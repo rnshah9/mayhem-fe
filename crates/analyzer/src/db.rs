@@ -1,12 +1,12 @@
 use crate::context::{Analysis, Constant, FunctionBody};
 use crate::errors::{ConstEvalError, TypeError};
 use crate::namespace::items::{
-    self, ContractFieldId, ContractId, DepGraphWrapper, EventId, FunctionId, IngotId, Item,
-    ModuleConstantId, ModuleId, StructFieldId, StructId, TypeAliasId,
+    self, ContractFieldId, ContractId, DepGraphWrapper, EventId, FunctionId, FunctionSigId, ImplId,
+    IngotId, Item, ModuleConstantId, ModuleId, StructFieldId, StructId, TraitId, TypeAliasId,
 };
-use crate::namespace::types;
+use crate::namespace::types::{self, Type, TypeId};
 use fe_common::db::{SourceDb, SourceDbStorage, Upcast, UpcastMut};
-use fe_common::Span;
+use fe_common::{SourceFileId, Span};
 use fe_parser::ast;
 use indexmap::map::IndexMap;
 use smol_str::SmolStr;
@@ -24,6 +24,10 @@ pub trait AnalyzerDb: SourceDb + Upcast<dyn SourceDb> + UpcastMut<dyn SourceDb> 
     #[salsa::interned]
     fn intern_struct(&self, data: Rc<items::Struct>) -> StructId;
     #[salsa::interned]
+    fn intern_trait(&self, data: Rc<items::Trait>) -> TraitId;
+    #[salsa::interned]
+    fn intern_impl(&self, data: Rc<items::Impl>) -> ImplId;
+    #[salsa::interned]
     fn intern_struct_field(&self, data: Rc<items::StructField>) -> StructFieldId;
     #[salsa::interned]
     fn intern_type_alias(&self, data: Rc<items::TypeAlias>) -> TypeAliasId;
@@ -32,23 +36,30 @@ pub trait AnalyzerDb: SourceDb + Upcast<dyn SourceDb> + UpcastMut<dyn SourceDb> 
     #[salsa::interned]
     fn intern_contract_field(&self, data: Rc<items::ContractField>) -> ContractFieldId;
     #[salsa::interned]
+    fn intern_function_sig(&self, data: Rc<items::FunctionSig>) -> FunctionSigId;
+    #[salsa::interned]
     fn intern_function(&self, data: Rc<items::Function>) -> FunctionId;
     #[salsa::interned]
     fn intern_event(&self, data: Rc<items::Event>) -> EventId;
+    #[salsa::interned]
+    fn intern_type(&self, data: Type) -> TypeId;
 
     // Ingot
 
     // These are inputs so that the (future) language server can add
-    // and remove files/dependencies. Set via eg `db.set_ingot_modules`.
+    // and remove files/dependencies. Set via eg `db.set_ingot_files`.
     // If an input is used before it's set, salsa will panic.
-    // Ideally, `ingot_files` would be the input instead, but in order to support analysis
-    // of the post-lowering-phase stuff, we need to be able to construct a new
-    // lowered ingot, and give it a set of lowered modules.
     #[salsa::input]
-    fn ingot_modules(&self, ingot: IngotId) -> Rc<[ModuleId]>;
+    fn ingot_files(&self, ingot: IngotId) -> Rc<[SourceFileId]>;
     #[salsa::input]
     fn ingot_external_ingots(&self, ingot: IngotId) -> Rc<IndexMap<SmolStr, IngotId>>;
+    // Having the root ingot available as a "global" might offend functional programming purists
+    // but it makes for much nicer ergonomics in queries that just need the global entrypoint
+    #[salsa::input]
+    fn root_ingot(&self) -> IngotId;
 
+    #[salsa::invoke(queries::ingots::ingot_modules)]
+    fn ingot_modules(&self, ingot: IngotId) -> Rc<[ModuleId]>;
     #[salsa::invoke(queries::ingots::ingot_root_module)]
     fn ingot_root_module(&self, ingot: IngotId) -> Option<ModuleId>;
 
@@ -61,8 +72,15 @@ pub trait AnalyzerDb: SourceDb + Upcast<dyn SourceDb> + UpcastMut<dyn SourceDb> 
     fn module_is_incomplete(&self, module: ModuleId) -> bool;
     #[salsa::invoke(queries::module::module_all_items)]
     fn module_all_items(&self, module: ModuleId) -> Rc<[Item]>;
+    #[salsa::invoke(queries::module::module_all_impls)]
+    fn module_all_impls(&self, module: ModuleId) -> Rc<[ImplId]>;
     #[salsa::invoke(queries::module::module_item_map)]
     fn module_item_map(&self, module: ModuleId) -> Analysis<Rc<IndexMap<SmolStr, Item>>>;
+    #[salsa::invoke(queries::module::module_impl_map)]
+    fn module_impl_map(
+        &self,
+        module: ModuleId,
+    ) -> Analysis<Rc<IndexMap<(TraitId, TypeId), ImplId>>>;
     #[salsa::invoke(queries::module::module_contracts)]
     fn module_contracts(&self, module: ModuleId) -> Rc<[ContractId]>;
     #[salsa::invoke(queries::module::module_structs)]
@@ -82,10 +100,7 @@ pub trait AnalyzerDb: SourceDb + Upcast<dyn SourceDb> + UpcastMut<dyn SourceDb> 
     // Module Constant
     #[salsa::cycle(queries::module::module_constant_type_cycle)]
     #[salsa::invoke(queries::module::module_constant_type)]
-    fn module_constant_type(
-        &self,
-        id: ModuleConstantId,
-    ) -> Analysis<Result<types::Type, TypeError>>;
+    fn module_constant_type(&self, id: ModuleConstantId) -> Analysis<Result<TypeId, TypeError>>;
     #[salsa::cycle(queries::module::module_constant_value_cycle)]
     #[salsa::invoke(queries::module::module_constant_value)]
     fn module_constant_value(
@@ -118,10 +133,7 @@ pub trait AnalyzerDb: SourceDb + Upcast<dyn SourceDb> + UpcastMut<dyn SourceDb> 
         id: ContractId,
     ) -> Analysis<Rc<IndexMap<SmolStr, ContractFieldId>>>;
     #[salsa::invoke(queries::contracts::contract_field_type)]
-    fn contract_field_type(
-        &self,
-        field: ContractFieldId,
-    ) -> Analysis<Result<types::Type, TypeError>>;
+    fn contract_field_type(&self, field: ContractFieldId) -> Analysis<Result<TypeId, TypeError>>;
     #[salsa::cycle(queries::contracts::contract_dependency_graph_cycle)]
     #[salsa::invoke(queries::contracts::contract_dependency_graph)]
     fn contract_dependency_graph(&self, id: ContractId) -> DepGraphWrapper;
@@ -131,7 +143,7 @@ pub trait AnalyzerDb: SourceDb + Upcast<dyn SourceDb> + UpcastMut<dyn SourceDb> 
 
     // Function
     #[salsa::invoke(queries::functions::function_signature)]
-    fn function_signature(&self, id: FunctionId) -> Analysis<Rc<types::FunctionSignature>>;
+    fn function_signature(&self, id: FunctionSigId) -> Analysis<Rc<types::FunctionSignature>>;
     #[salsa::invoke(queries::functions::function_body)]
     fn function_body(&self, id: FunctionId) -> Analysis<Rc<FunctionBody>>;
     #[salsa::cycle(queries::functions::function_dependency_graph_cycle)]
@@ -139,32 +151,50 @@ pub trait AnalyzerDb: SourceDb + Upcast<dyn SourceDb> + UpcastMut<dyn SourceDb> 
     fn function_dependency_graph(&self, id: FunctionId) -> DepGraphWrapper;
 
     // Struct
-    #[salsa::invoke(queries::structs::struct_type)]
-    fn struct_type(&self, id: StructId) -> Rc<types::Struct>;
     #[salsa::invoke(queries::structs::struct_all_fields)]
     fn struct_all_fields(&self, id: StructId) -> Rc<[StructFieldId]>;
     #[salsa::invoke(queries::structs::struct_field_map)]
     fn struct_field_map(&self, id: StructId) -> Analysis<Rc<IndexMap<SmolStr, StructFieldId>>>;
     #[salsa::invoke(queries::structs::struct_field_type)]
-    fn struct_field_type(
-        &self,
-        field: StructFieldId,
-    ) -> Analysis<Result<types::FixedSize, TypeError>>;
+    fn struct_field_type(&self, field: StructFieldId) -> Analysis<Result<TypeId, TypeError>>;
     #[salsa::invoke(queries::structs::struct_all_functions)]
     fn struct_all_functions(&self, id: StructId) -> Rc<[FunctionId]>;
     #[salsa::invoke(queries::structs::struct_function_map)]
     fn struct_function_map(&self, id: StructId) -> Analysis<Rc<IndexMap<SmolStr, FunctionId>>>;
+    #[salsa::cycle(queries::structs::struct_cycle)]
     #[salsa::invoke(queries::structs::struct_dependency_graph)]
-    fn struct_dependency_graph(&self, id: StructId) -> DepGraphWrapper;
+    fn struct_dependency_graph(&self, id: StructId) -> Analysis<DepGraphWrapper>;
+
+    // Trait
+    #[salsa::invoke(queries::traits::trait_all_functions)]
+    fn trait_all_functions(&self, id: TraitId) -> Rc<[FunctionSigId]>;
+    #[salsa::invoke(queries::traits::trait_function_map)]
+    fn trait_function_map(&self, id: TraitId) -> Analysis<Rc<IndexMap<SmolStr, FunctionSigId>>>;
+    #[salsa::invoke(queries::traits::trait_is_implemented_for)]
+    fn trait_is_implemented_for(&self, id: TraitId, typ: TypeId) -> bool;
+
+    // Impl
+    #[salsa::invoke(queries::impls::impl_all_functions)]
+    fn impl_all_functions(&self, id: ImplId) -> Rc<[FunctionId]>;
+    #[salsa::invoke(queries::impls::impl_function_map)]
+    fn impl_function_map(&self, id: ImplId) -> Analysis<Rc<IndexMap<SmolStr, FunctionId>>>;
 
     // Event
     #[salsa::invoke(queries::events::event_type)]
     fn event_type(&self, event: EventId) -> Analysis<Rc<types::Event>>;
 
+    // Type
+    #[salsa::invoke(queries::types::all_impls)]
+    fn all_impls(&self, ty: TypeId) -> Rc<[ImplId]>;
+    #[salsa::invoke(queries::types::impl_for)]
+    fn impl_for(&self, ty: TypeId, treit: TraitId) -> Option<ImplId>;
+    #[salsa::invoke(queries::types::function_sigs)]
+    fn function_sigs(&self, ty: TypeId, name: SmolStr) -> Rc<[FunctionSigId]>;
+
     // Type alias
     #[salsa::invoke(queries::types::type_alias_type)]
     #[salsa::cycle(queries::types::type_alias_type_cycle)]
-    fn type_alias_type(&self, id: TypeAliasId) -> Analysis<Result<types::Type, TypeError>>;
+    fn type_alias_type(&self, id: TypeAliasId) -> Analysis<Result<TypeId, TypeError>>;
 }
 
 #[salsa::database(AnalyzerDbStorage, SourceDbStorage)]

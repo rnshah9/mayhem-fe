@@ -2,7 +2,8 @@ use super::contracts::parse_contract_def;
 use super::expressions::parse_expr;
 use super::functions::parse_fn_def;
 use super::types::{
-    parse_event_def, parse_path_tail, parse_struct_def, parse_type_alias, parse_type_desc,
+    parse_event_def, parse_impl_def, parse_path_tail, parse_struct_def, parse_trait_def,
+    parse_type_alias, parse_type_desc,
 };
 use crate::ast::{ConstantDecl, Module, ModuleStmt, Pragma, Use, UseTree};
 use crate::node::{Node, Span};
@@ -15,10 +16,8 @@ pub fn parse_module(par: &mut Parser) -> Node<Module> {
     let mut body = vec![];
     loop {
         match par.peek() {
-            Some(TokenKind::Newline) => par.expect_newline("module").unwrap(),
-            Some(TokenKind::Dedent) => {
+            Some(TokenKind::Newline) => {
                 par.next().unwrap();
-                break;
             }
             None => break,
             Some(_) => {
@@ -44,12 +43,12 @@ pub fn parse_module_stmt(par: &mut Parser) -> ParseResult<ModuleStmt> {
         TokenKind::Use => ModuleStmt::Use(parse_use(par)?),
         TokenKind::Contract => ModuleStmt::Contract(parse_contract_def(par, None)?),
         TokenKind::Struct => ModuleStmt::Struct(parse_struct_def(par, None)?),
+        TokenKind::Trait => ModuleStmt::Trait(parse_trait_def(par, None)?),
+        TokenKind::Impl => ModuleStmt::Impl(parse_impl_def(par)?),
         TokenKind::Type => ModuleStmt::TypeAlias(parse_type_alias(par, None)?),
         TokenKind::Const => ModuleStmt::Constant(parse_constant(par, None)?),
 
-        // Let these be parse errors for now:
         TokenKind::Event => ModuleStmt::Event(parse_event_def(par, None)?),
-        // TokenKind::Name if par.peeked_text() == "from" => parse_from_import(par),
         TokenKind::Pub => {
             let pub_span = par.next()?.span;
             match par.peek_or_err()? {
@@ -58,6 +57,7 @@ pub fn parse_module_stmt(par: &mut Parser) -> ParseResult<ModuleStmt> {
                     ModuleStmt::Function(parse_fn_def(par, Some(pub_span))?)
                 }
                 TokenKind::Struct => ModuleStmt::Struct(parse_struct_def(par, Some(pub_span))?),
+                TokenKind::Trait => ModuleStmt::Trait(parse_trait_def(par, Some(pub_span))?),
                 TokenKind::Type => ModuleStmt::TypeAlias(parse_type_alias(par, Some(pub_span))?),
                 TokenKind::Const => ModuleStmt::Constant(parse_constant(par, Some(pub_span))?),
                 TokenKind::Contract => {
@@ -66,7 +66,7 @@ pub fn parse_module_stmt(par: &mut Parser) -> ParseResult<ModuleStmt> {
                 _ => {
                     let tok = par.next()?;
                     par.unexpected_token_error(
-                        tok.span,
+                        &tok,
                         "failed to parse module",
                         vec!["Note: expected `fn`".into()],
                     );
@@ -78,7 +78,7 @@ pub fn parse_module_stmt(par: &mut Parser) -> ParseResult<ModuleStmt> {
         _ => {
             let tok = par.next()?;
             par.unexpected_token_error(
-                tok.span,
+                &tok,
                 "failed to parse module",
                 vec!["Note: expected import, contract, struct, type, const or event".into()],
             );
@@ -180,7 +180,7 @@ pub fn parse_use_tree(par: &mut Parser) -> ParseResult<Node<UseTree>> {
                         }
                         _ => {
                             par.unexpected_token_error(
-                                tok.span,
+                                &tok,
                                 "failed to parse `use` tree",
                                 vec!["Note: expected a `,` or `}` token".to_string()],
                             );
@@ -204,7 +204,7 @@ pub fn parse_use_tree(par: &mut Parser) -> ParseResult<Node<UseTree>> {
             _ => {
                 let tok = par.next()?;
                 par.unexpected_token_error(
-                    tok.span,
+                    &tok,
                     "failed to parse `use` tree",
                     vec!["Note: expected a `*`, `{` or name token".to_string()],
                 );

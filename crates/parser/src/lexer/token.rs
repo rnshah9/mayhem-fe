@@ -37,13 +37,9 @@ pub enum TokenKind {
     #[regex(r"\n[ \t]*")]
     Newline,
 
-    /// Virtual tokens emitted by the parser
-    Indent,
-    Dedent,
-
     #[regex("[a-zA-Z_][a-zA-Z0-9_]*")]
     Name,
-    #[regex("[0-9]+")]
+    #[regex("[0-9]+(?:_[0-9]+)*")]
     Int,
     #[regex("0[xX][0-9a-fA-F]+")]
     Hex,
@@ -73,8 +69,6 @@ pub enum TokenKind {
     Fn,
     #[token("const")]
     Const,
-    #[token("elif")]
-    Elif,
     #[token("else")]
     Else,
     #[token("emit")]
@@ -85,10 +79,10 @@ pub enum TokenKind {
     Idx,
     #[token("if")]
     If,
+    #[token("impl")]
+    Impl,
     #[token("pragma")]
     Pragma,
-    #[token("pass")]
-    Pass,
     #[token("for")]
     For,
     #[token("pub")]
@@ -101,6 +95,8 @@ pub enum TokenKind {
     SelfValue,
     #[token("struct")]
     Struct,
+    #[token("trait")]
+    Trait,
     #[token("type")]
     Type,
     #[token("unsafe")]
@@ -217,8 +213,6 @@ impl TokenKind {
         use TokenKind::*;
         match self {
             Newline => "a newline",
-            Dedent => "a dedent",
-            Indent => "an indentation",
             Name => "a name",
             Int => "a number",
             Hex => "a hexadecimal number",
@@ -235,20 +229,20 @@ impl TokenKind {
             Fn => "keyword `fn`",
             Const => "keyword `const`",
             Let => "keyword `let`",
-            Elif => "keyword `elif`",
             Else => "keyword `else`",
             Emit => "keyword `emit`",
             Event => "keyword `event`",
             Idx => "keyword `idx`",
             If => "keyword `if`",
+            Impl => "keyword `impl`",
             Pragma => "keyword `pragma`",
-            Pass => "keyword `pass`",
             For => "keyword `for`",
             Pub => "keyword `pub`",
             Return => "keyword `return`",
             Revert => "keyword `revert`",
             SelfValue => "keyword `self`",
             Struct => "keyword `struct`",
+            Trait => "keyword `trait`",
             Type => "keyword `type`",
             Unsafe => "keyword `unsafe`",
             While => "keyword `while`",
@@ -267,7 +261,7 @@ impl TokenKind {
             Colon => "symbol `:`",
             ColonColon => "symbol `::`",
             Comma => "symbol `,`",
-            Semi => "symbol ``",
+            Semi => "symbol `;`",
             Plus => "symbol `+`",
             Minus => "symbol `-`",
             Star => "symbol `*`",
@@ -301,7 +295,7 @@ impl TokenKind {
             GtGtEq => "symbol `>>=`",
             Arrow => "symbol `->`",
 
-            Error => unreachable!(),
+            Error => unreachable!(), // TODO this is reachable
         }
     }
 }

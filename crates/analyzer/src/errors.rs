@@ -9,7 +9,7 @@ use std::fmt::Display;
 ///
 /// Note that the "type" of a thing (eg the type of a `FunctionParam`)
 /// in [`crate::namespace::types`] is sometimes represented as a
-/// `Result<FixedSize, TypeError>`.
+/// `Result<Type, TypeError>`.
 ///
 /// If, for example, a function parameter has an undefined type, we emit a [`Diagnostic`] message,
 /// give that parameter a "type" of `Err(TypeError)`, and carry on. If/when that parameter is
@@ -124,10 +124,6 @@ pub struct AlreadyDefined;
 #[derive(Debug)]
 pub struct CannotMove;
 
-/// Error indicating that a [`Type`] can't be converted into a [`FixedSize`]
-#[derive(Debug)]
-pub struct NotFixedSize;
-
 /// Errors that can result from indexing
 #[derive(Debug, PartialEq)]
 pub enum IndexingError {
@@ -144,9 +140,6 @@ pub enum BinaryOperationError {
     RightIsSigned,
     NotEqualAndUnsigned,
 }
-
-#[derive(Debug)]
-pub struct AnalyzerError(pub Vec<Diagnostic>);
 
 impl From<TypeError> for FatalError {
     fn from(err: TypeError) -> Self {

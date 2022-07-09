@@ -1,6 +1,6 @@
 ## Deploy your contract.
 
-Since we have written our first contract now, how about we bring it to live and use it on an actual chain?
+Since we have written our first contract now, how about we bring it alive and use it on an actual chain?
 
 Deploying such a demo contract to the Ethereum mainnet would be a waste of money but fortunately we have a few other options to choose from. For instance, we can use our very own local blockchain instance which is great for local development. Alternatively we can use a test network that provides developers shared infrastructure to deploy code without spending actual money on it.
 
@@ -17,7 +17,8 @@ To follow this guide, you will first need to head over to [dapp.tools](https://d
 
 ### Setting up a Görli user account
 
-To deploy our contract to the Görli testnet we will need to have an Ethereum account that has some GöETH. GöETH has no real value but it is still a resource that is needed as a basic line of defense against spamming the testnet. If you don't have any GöETH yet, you can request some from this [faucet](https://goerli-faucet.slock.it/)
+To deploy our contract to the Görli testnet we will need to have an Ethereum account that has some GöETH. GöETH has no real value but it is still a resource that is needed as a basic line of defense against spamming the testnet. If you don't have any GöETH yet, you can request some from these faucets:  [faucet1](https://goerlifaucet.com/), and [faucet2](https://faucet.paradigm.xyz/).
+You can also check a list of faucets [here](https://forum.openzeppelin.com/t/goerli-testnet-faucets/26710).
 
 The next thing we need is to create a keystore file for our account so that dapp tools can sign messages via [`ethsign`](https://github.com/dapphub/dapptools/tree/master/src/ethsign).
 
@@ -33,22 +34,25 @@ ethsign import --keystore ~/.ethereum/keystore/
 
 Let's recall that we finished our guest book in the previous chapter with the following code.
 
-```python
+```fe
 use std::context::Context
 
-contract GuestBook:
+contract GuestBook {
   messages: Map<address, String<100>>
 
-  pub fn sign(self, ctx: Context, book_msg: String<100>):
-      self.messages[ctx.msg_sender()] = book_msg
+  pub fn sign(self, ctx: Context, book_msg: String<100>) {
+    self.messages[ctx.msg_sender()] = book_msg
+  }
 
-  pub fn get_msg(self, addr: address) -> String<100>:
-      return self.messages[addr].to_mem()
+  pub fn get_msg(self, addr: address) -> String<100> {
+    return self.messages[addr].to_mem()
+  }
+}
 ```
 
 If you haven't already, run `./fe guest_book.fe --overwrite` to obtain the bytecode that we want to deploy.
 
-To make the deployment, we will need to send a transaction to a node that participates in the Görli network. We can run our own node, sign up at Infura to use one of their nodes or find an open public node such as `https://goerli-light.eth.linkpool.io` which we will use to keep this tutorial as accessible as possible.
+To make the deployment, we will need to send a transaction to a node that participates in the Görli network. We can run our own node, sign up at [Infura](https://infura.io/) or [Alchemy](https://www.alchemy.com/) to use one of their nodes or find an open public node such as `https://goerli-light.eth.linkpool.io` which we will use to keep this tutorial as accessible as possible.
 
 Use the following command to deploy the contract. Please note that `<rpc-url>` needs to be replaced with the URL of the node that we connect to and `<our-eth-address>` needs to be replaced with the Ethereum address that we imported in the previous step.
 
@@ -97,7 +101,7 @@ Just as before, the response tells us the transaction hash [`0xf61c042064a501939
 
 The `get_msg(address)` API let's us read any signature for any address but it will give us an response of 100 zero bytes for any address that simply hasn't signed the guestbook.
 
-Since reading the messages doesn't change any state within the blochchain, we don't have to send and actual transaction. Instead we just perform a *call* against the local state of the node that we are querying.
+Since reading the messages doesn't change any state within the blochchain, we don't have to send an actual transaction. Instead we just perform a *call* against the local state of the node that we are querying.
 
 To do that run:
 
@@ -115,5 +119,3 @@ We <3 Fe
 As we can see in the last line of the output the signature for address `0x4E14AaF86CF0759d6Ec8C7433acd66F07D093293` is in fact *We <3 Fe*.
 
 Congratulations! You've deployed real Fe code to a live network 🤖
-
-

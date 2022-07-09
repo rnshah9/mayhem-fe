@@ -12,250 +12,77 @@ note:
   │         ^^^^^^^^^^ u256
 
 note: 
-   ┌─ events.fe:9:9
+   ┌─ events.fe:10:9
    │
- 9 │         num: u256
+10 │         num: u256
    │         ^^^^^^^^^ u256
-10 │         addr: address
+11 │         addr: address
    │         ^^^^^^^^^^^^^ address
 
 note: 
-   ┌─ events.fe:13:9
+   ┌─ events.fe:15:9
    │
-13 │         num1: u256
+15 │         num1: u256
    │         ^^^^^^^^^^ u256
-14 │         idx addr: address
+16 │         idx addr: address
    │         ^^^^^^^^^^^^^^^^^ address
-15 │         num2: u256
+17 │         num2: u256
    │         ^^^^^^^^^^ u256
-16 │         my_bytes: Array<u8, 100>
+18 │         my_bytes: Array<u8, 100>
    │         ^^^^^^^^^^^^^^^^^^^^^^^^ Array<u8, 100>
 
 note: 
-   ┌─ events.fe:19:9
+   ┌─ events.fe:22:9
    │
-19 │         addrs: Array<address, 2>
+22 │         addrs: Array<address, 2>
    │         ^^^^^^^^^^^^^^^^^^^^^^^^ Array<address, 2>
 
 note: 
-   ┌─ events.fe:21:5
+   ┌─ events.fe:25:5
    │  
-21 │ ╭     pub fn emit_nums(ctx: Context):
-22 │ │         emit Nums(ctx, num1: 26, num2: 42)
-   │ ╰──────────────────────────────────────────^ attributes hash: 5519676733853656531
-   │  
-   = FunctionSignature {
-         self_decl: None,
-         ctx_decl: Some(
-             Mutable,
-         ),
-         params: [
-             FunctionParam {
-                 label: None,
-                 name: "ctx",
-                 typ: Ok(
-                     Struct(
-                         Struct {
-                             name: "Context",
-                             field_count: 0,
-                         },
-                     ),
-                 ),
-             },
-         ],
-         return_type: Ok(
-             Base(
-                 Unit,
-             ),
-         ),
-     }
+25 │ ╭     pub fn emit_nums(ctx: Context) {
+26 │ │         emit Nums(ctx, num1: 26, num2: 42)
+27 │ │     }
+   │ ╰─────^ self: None, params: [{ label: None, name: ctx, typ: Context }] -> ()
 
 note: 
-   ┌─ events.fe:22:19
+   ┌─ events.fe:26:19
    │
-22 │         emit Nums(ctx, num1: 26, num2: 42)
+26 │         emit Nums(ctx, num1: 26, num2: 42)
    │                   ^^^        ^^        ^^ u256: Value
    │                   │          │          
    │                   │          u256: Value
    │                   Context: Memory
 
 note: 
-   ┌─ events.fe:22:9
-   │
-22 │         emit Nums(ctx, num1: 26, num2: 42)
-   │         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ attributes hash: 4681095448721924839
-   │
-   = Event {
-         name: "Nums",
-         fields: [
-             EventField {
-                 name: "num1",
-                 typ: Ok(
-                     Base(
-                         Numeric(
-                             U256,
-                         ),
-                     ),
-                 ),
-                 is_indexed: true,
-             },
-             EventField {
-                 name: "num2",
-                 typ: Ok(
-                     Base(
-                         Numeric(
-                             U256,
-                         ),
-                     ),
-                 ),
-                 is_indexed: false,
-             },
-         ],
-     }
+   ┌─ events.fe:29:5
+   │  
+29 │ ╭     pub fn emit_bases(ctx: Context, addr: address) {
+30 │ │         emit Bases(ctx, num: 26, addr)
+31 │ │     }
+   │ ╰─────^ self: None, params: [{ label: None, name: ctx, typ: Context }, { label: None, name: addr, typ: address }] -> ()
 
 note: 
-   ┌─ events.fe:24:5
-   │  
-24 │ ╭     pub fn emit_bases(ctx: Context, addr: address):
-25 │ │         emit Bases(ctx, num: 26, addr)
-   │ ╰──────────────────────────────────────^ attributes hash: 15383426943610850221
-   │  
-   = FunctionSignature {
-         self_decl: None,
-         ctx_decl: Some(
-             Mutable,
-         ),
-         params: [
-             FunctionParam {
-                 label: None,
-                 name: "ctx",
-                 typ: Ok(
-                     Struct(
-                         Struct {
-                             name: "Context",
-                             field_count: 0,
-                         },
-                     ),
-                 ),
-             },
-             FunctionParam {
-                 label: None,
-                 name: "addr",
-                 typ: Ok(
-                     Base(
-                         Address,
-                     ),
-                 ),
-             },
-         ],
-         return_type: Ok(
-             Base(
-                 Unit,
-             ),
-         ),
-     }
-
-note: 
-   ┌─ events.fe:25:20
+   ┌─ events.fe:30:20
    │
-25 │         emit Bases(ctx, num: 26, addr)
+30 │         emit Bases(ctx, num: 26, addr)
    │                    ^^^       ^^  ^^^^ address: Value
    │                    │         │    
    │                    │         u256: Value
    │                    Context: Memory
 
 note: 
-   ┌─ events.fe:25:9
-   │
-25 │         emit Bases(ctx, num: 26, addr)
-   │         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ attributes hash: 4407350417102602838
-   │
-   = Event {
-         name: "Bases",
-         fields: [
-             EventField {
-                 name: "num",
-                 typ: Ok(
-                     Base(
-                         Numeric(
-                             U256,
-                         ),
-                     ),
-                 ),
-                 is_indexed: false,
-             },
-             EventField {
-                 name: "addr",
-                 typ: Ok(
-                     Base(
-                         Address,
-                     ),
-                 ),
-                 is_indexed: false,
-             },
-         ],
-     }
+   ┌─ events.fe:33:5
+   │  
+33 │ ╭     pub fn emit_mix(ctx: Context, addr: address, my_bytes: Array<u8, 100>) {
+34 │ │         emit Mix(ctx, num1: 26, addr, num2: 42, my_bytes)
+35 │ │     }
+   │ ╰─────^ self: None, params: [{ label: None, name: ctx, typ: Context }, { label: None, name: addr, typ: address }, { label: None, name: my_bytes, typ: Array<u8, 100> }] -> ()
 
 note: 
-   ┌─ events.fe:27:5
-   │  
-27 │ ╭     pub fn emit_mix(ctx: Context, addr: address, my_bytes: Array<u8, 100>):
-28 │ │         emit Mix(ctx, num1: 26, addr, num2: 42, my_bytes)
-   │ ╰─────────────────────────────────────────────────────────^ attributes hash: 9652612436637375041
-   │  
-   = FunctionSignature {
-         self_decl: None,
-         ctx_decl: Some(
-             Mutable,
-         ),
-         params: [
-             FunctionParam {
-                 label: None,
-                 name: "ctx",
-                 typ: Ok(
-                     Struct(
-                         Struct {
-                             name: "Context",
-                             field_count: 0,
-                         },
-                     ),
-                 ),
-             },
-             FunctionParam {
-                 label: None,
-                 name: "addr",
-                 typ: Ok(
-                     Base(
-                         Address,
-                     ),
-                 ),
-             },
-             FunctionParam {
-                 label: None,
-                 name: "my_bytes",
-                 typ: Ok(
-                     Array(
-                         Array {
-                             size: 100,
-                             inner: Numeric(
-                                 U8,
-                             ),
-                         },
-                     ),
-                 ),
-             },
-         ],
-         return_type: Ok(
-             Base(
-                 Unit,
-             ),
-         ),
-     }
-
-note: 
-   ┌─ events.fe:28:18
+   ┌─ events.fe:34:18
    │
-28 │         emit Mix(ctx, num1: 26, addr, num2: 42, my_bytes)
+34 │         emit Mix(ctx, num1: 26, addr, num2: 42, my_bytes)
    │                  ^^^        ^^  ^^^^        ^^  ^^^^^^^^ Array<u8, 100>: Memory
    │                  │          │   │           │    
    │                  │          │   │           u256: Value
@@ -264,176 +91,68 @@ note:
    │                  Context: Memory
 
 note: 
-   ┌─ events.fe:28:9
-   │
-28 │         emit Mix(ctx, num1: 26, addr, num2: 42, my_bytes)
-   │         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ attributes hash: 12006518826467385253
-   │
-   = Event {
-         name: "Mix",
-         fields: [
-             EventField {
-                 name: "num1",
-                 typ: Ok(
-                     Base(
-                         Numeric(
-                             U256,
-                         ),
-                     ),
-                 ),
-                 is_indexed: false,
-             },
-             EventField {
-                 name: "addr",
-                 typ: Ok(
-                     Base(
-                         Address,
-                     ),
-                 ),
-                 is_indexed: true,
-             },
-             EventField {
-                 name: "num2",
-                 typ: Ok(
-                     Base(
-                         Numeric(
-                             U256,
-                         ),
-                     ),
-                 ),
-                 is_indexed: false,
-             },
-             EventField {
-                 name: "my_bytes",
-                 typ: Ok(
-                     Array(
-                         Array {
-                             size: 100,
-                             inner: Numeric(
-                                 U8,
-                             ),
-                         },
-                     ),
-                 ),
-                 is_indexed: false,
-             },
-         ],
-     }
-
-note: 
-   ┌─ events.fe:30:5
+   ┌─ events.fe:37:5
    │  
-30 │ ╭     pub fn emit_addresses(ctx: Context, addr1: address, addr2: address):
-31 │ │         let addrs: Array<address, 2>
-32 │ │         addrs[0] = addr1
-33 │ │         addrs[1] = addr2
-34 │ │         emit Addresses(ctx, addrs)
-   │ ╰──────────────────────────────────^ attributes hash: 18438233211486921531
-   │  
-   = FunctionSignature {
-         self_decl: None,
-         ctx_decl: Some(
-             Mutable,
-         ),
-         params: [
-             FunctionParam {
-                 label: None,
-                 name: "ctx",
-                 typ: Ok(
-                     Struct(
-                         Struct {
-                             name: "Context",
-                             field_count: 0,
-                         },
-                     ),
-                 ),
-             },
-             FunctionParam {
-                 label: None,
-                 name: "addr1",
-                 typ: Ok(
-                     Base(
-                         Address,
-                     ),
-                 ),
-             },
-             FunctionParam {
-                 label: None,
-                 name: "addr2",
-                 typ: Ok(
-                     Base(
-                         Address,
-                     ),
-                 ),
-             },
-         ],
-         return_type: Ok(
-             Base(
-                 Unit,
-             ),
-         ),
-     }
+37 │ ╭     pub fn emit_addresses(ctx: Context, addr1: address, addr2: address) {
+38 │ │         let addrs: Array<address, 2> = [address(0); 2]
+39 │ │         addrs[0] = addr1
+40 │ │         addrs[1] = addr2
+41 │ │         emit Addresses(ctx, addrs)
+42 │ │     }
+   │ ╰─────^ self: None, params: [{ label: None, name: ctx, typ: Context }, { label: None, name: addr1, typ: address }, { label: None, name: addr2, typ: address }] -> ()
 
 note: 
-   ┌─ events.fe:31:20
+   ┌─ events.fe:38:13
    │
-31 │         let addrs: Array<address, 2>
-   │                    ^^^^^^^^^^^^^^^^^ Array<address, 2>
+38 │         let addrs: Array<address, 2> = [address(0); 2]
+   │             ^^^^^ Array<address, 2>
 
 note: 
-   ┌─ events.fe:32:9
+   ┌─ events.fe:38:49
    │
-32 │         addrs[0] = addr1
+38 │         let addrs: Array<address, 2> = [address(0); 2]
+   │                                                 ^ u256: Value
+
+note: 
+   ┌─ events.fe:38:41
+   │
+38 │         let addrs: Array<address, 2> = [address(0); 2]
+   │                                         ^^^^^^^^^^  ^ u256: Value
+   │                                         │            
+   │                                         address: Value
+
+note: 
+   ┌─ events.fe:38:40
+   │
+38 │         let addrs: Array<address, 2> = [address(0); 2]
+   │                                        ^^^^^^^^^^^^^^^ Array<address, 2>: Memory
+39 │         addrs[0] = addr1
    │         ^^^^^ ^ u256: Value
    │         │      
    │         Array<address, 2>: Memory
 
 note: 
-   ┌─ events.fe:32:9
+   ┌─ events.fe:39:9
    │
-32 │         addrs[0] = addr1
+39 │         addrs[0] = addr1
    │         ^^^^^^^^   ^^^^^ address: Value
    │         │           
    │         address: Memory
-33 │         addrs[1] = addr2
+40 │         addrs[1] = addr2
    │         ^^^^^ ^ u256: Value
    │         │      
    │         Array<address, 2>: Memory
 
 note: 
-   ┌─ events.fe:33:9
+   ┌─ events.fe:40:9
    │
-33 │         addrs[1] = addr2
+40 │         addrs[1] = addr2
    │         ^^^^^^^^   ^^^^^ address: Value
    │         │           
    │         address: Memory
-34 │         emit Addresses(ctx, addrs)
+41 │         emit Addresses(ctx, addrs)
    │                        ^^^  ^^^^^ Array<address, 2>: Memory
    │                        │     
    │                        Context: Memory
-
-note: 
-   ┌─ events.fe:34:9
-   │
-34 │         emit Addresses(ctx, addrs)
-   │         ^^^^^^^^^^^^^^^^^^^^^^^^^^ attributes hash: 17766225573703958283
-   │
-   = Event {
-         name: "Addresses",
-         fields: [
-             EventField {
-                 name: "addrs",
-                 typ: Ok(
-                     Array(
-                         Array {
-                             size: 2,
-                             inner: Address,
-                         },
-                     ),
-                 ),
-                 is_indexed: false,
-             },
-         ],
-     }
 
 

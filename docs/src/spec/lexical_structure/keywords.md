@@ -8,7 +8,7 @@ Fe divides keywords into two categories:
 ## Strict keywords
 
 These keywords can only be used in their correct contexts. They cannot
-be used as the [identifies](./identifiers.md).
+be used as the [identifiers](./identifiers.md).
 
 > **Lexer:**\
 > KW_AS             : `as`\
@@ -17,7 +17,6 @@ be used as the [identifies](./identifiers.md).
 > KW_CONTINUE       : `continue`\
 > KW_CONST          : `contract`\
 > KW_FN             : `fn`\
-> KW_ELIF           : `elif`\
 > KW_ELSE           : `else`\
 > KW_EMIT           : `emit`\
 > KW_ENUM           : `enum`\
@@ -29,7 +28,6 @@ be used as the [identifies](./identifiers.md).
 > KW_IN             : `in`\
 > KW_LET            : `let`\
 > KW_NONPAYABLE     : `nonpayable`\
-> KW_PASS           : `pass`\
 > KW_PAYABLE        : `payable`\
 > KW_PUB            : `pub`\
 > KW_RETURN         : `return`\

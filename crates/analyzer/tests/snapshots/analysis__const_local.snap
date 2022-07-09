@@ -6,55 +6,42 @@ expression: "build_snapshot(&db, module)"
 note: 
    ┌─ const_local.fe:2:5
    │  
- 2 │ ╭     pub fn bar() -> u256:
+ 2 │ ╭     pub fn bar() -> u256 {
  3 │ │         const C1: i64 = 1
  4 │ │         const C2: i64 = 2
  5 │ │         const C3: i64 = 10
    · │
-14 │ │         let _arr: Array<bool, { C10 }>
 15 │ │         return C10
-   │ ╰──────────────────^ attributes hash: 6115314201970082834
-   │  
-   = FunctionSignature {
-         self_decl: None,
-         ctx_decl: None,
-         params: [],
-         return_type: Ok(
-             Base(
-                 Numeric(
-                     U256,
-                 ),
-             ),
-         ),
-     }
+16 │ │     }
+   │ ╰─────^ self: None, params: [] -> u256
 
 note: 
-   ┌─ const_local.fe:3:19
+   ┌─ const_local.fe:3:15
    │
  3 │         const C1: i64 = 1
-   │                   ^^^ i64
+   │               ^^ i64
  4 │         const C2: i64 = 2
-   │                   ^^^ i64
+   │               ^^ i64
  5 │         const C3: i64 = 10
-   │                   ^^^ i64
+   │               ^^ i64
  6 │         const C4: i64 = (C1 * C2) + C3 # 12
-   │                   ^^^ i64
+   │               ^^ i64
  7 │         const EXP: u8 = 2
-   │                    ^^ u8
+   │               ^^^ u8
  8 │         const C5: i64 = (C2 ** EXP) # 4
-   │                   ^^^ i64
+   │               ^^ i64
  9 │         const C6: i64 = (C5 << 1) # 8
-   │                   ^^^ i64
+   │               ^^ i64
 10 │         const C7: bool = (C5 < C6) and (C4 > C5) # true
-   │                   ^^^^ bool
+   │               ^^ bool
 11 │         const C8: bool = false
-   │                   ^^^^ bool
+   │               ^^ bool
 12 │         const C9: bool = C8 < C7 # true
-   │                   ^^^^ bool
+   │               ^^ bool
 13 │         const C10: u256 = 42 if C9 else 0 # 42
-   │                    ^^^^ u256
-14 │         let _arr: Array<bool, { C10 }>
-   │                   ^^^^^^^^^^^^^^^^^^^^ Array<bool, 42>
+   │               ^^^ u256
+14 │         let _arr: Array<bool, { C10 }> = [true; { C10 }]
+   │             ^^^^ Array<bool, 42>
 
 note: 
   ┌─ const_local.fe:3:25
@@ -158,8 +145,17 @@ note:
    │
 13 │         const C10: u256 = 42 if C9 else 0 # 42
    │                           ^^^^^^^^^^^^^^^ u256: Value
-14 │         let _arr: Array<bool, { C10 }>
-   │                                 ^^^ u256: Value
+14 │         let _arr: Array<bool, { C10 }> = [true; { C10 }]
+   │                                 ^^^       ^^^^    ^^^ u256: Value
+   │                                 │         │        
+   │                                 │         bool: Value
+   │                                 u256: Value
+
+note: 
+   ┌─ const_local.fe:14:42
+   │
+14 │         let _arr: Array<bool, { C10 }> = [true; { C10 }]
+   │                                          ^^^^^^^^^^^^^^^ Array<bool, 42>: Memory
 15 │         return C10
    │                ^^^ u256: Value
 

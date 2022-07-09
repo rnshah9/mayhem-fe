@@ -3,10 +3,11 @@ source: crates/tests/src/features.rs
 expression: "format!(\"{}\", harness.gas_reporter)"
 
 ---
-add([Uint(10), Uint(100)]) used 259 gas
-self_balance([]) used 251 gas
-calldatasize([]) used 358 gas
-calldatacopy([Uint(36), Uint(32)]) used 465 gas
-callvalue([]) used 314 gas
-caller([]) used 292 gas
+add([Uint(10), Uint(100)]) used 223 gas
+self_balance([]) used 209 gas
+calldatasize([]) used 298 gas
+calldatacopy([Uint(36), Uint(32)]) used 454 gas
+callvalue([]) used 254 gas
+basefee([]) used 430 gas
+caller([]) used 232 gas
 

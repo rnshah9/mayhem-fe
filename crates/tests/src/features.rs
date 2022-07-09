@@ -438,6 +438,7 @@ fn test_arrays() {
     case::associated_fns("associated_fns.fe", &[uint_token(12)], uint_token(144)),
     case::struct_fns("struct_fns.fe", &[uint_token(10), uint_token(20)], uint_token(100)),
     case::cast_address_to_u256("cast_address_to_u256.fe", &[address_token(SOME_ADDRESS)], address_token(SOME_ADDRESS)),
+    case("for_loop_with_complex_elem_array.fe", &[], int_token(222)),
 )]
 fn test_method_return(fixture_file: &str, input: &[ethabi::Token], expected: ethabi::Token) {
     with_executor(&|mut executor| {
@@ -572,6 +573,7 @@ fn return_builtin_attributes() {
     let block_coinbase = address_token("0000000000000000000000000000000000000002");
     let block_timestamp = 1234567890;
     let block_difficulty = 12345;
+    let basefee = 1;
 
     let vicinity = evm::backend::MemoryVicinity {
         gas_price: U256::from(gas_price),
@@ -583,6 +585,7 @@ fn return_builtin_attributes() {
         block_timestamp: U256::from(block_timestamp),
         block_difficulty: U256::from(block_difficulty),
         block_gas_limit: primitive_types::U256::MAX,
+        block_base_fee_per_gas: U256::from(basefee),
     };
 
     let backend = evm::backend::MemoryBackend::new(&vicinity, BTreeMap::new());
@@ -594,6 +597,7 @@ fn return_builtin_attributes() {
         harness.caller = sender.clone().into_address().unwrap();
         let value = 55555;
         harness.value = U256::from(value);
+        harness.test_function(&mut executor, "base_fee", &[], Some(&uint_token(basefee)));
         harness.test_function(&mut executor, "coinbase", &[], Some(&block_coinbase));
         harness.test_function(
             &mut executor,
@@ -852,7 +856,19 @@ fn test_numeric_sizes() {
             );
             harness.test_function(
                 &mut executor,
+                &format!("get_u{}_const_min", config.size),
+                &[],
+                Some(&config.u_min.clone()),
+            );
+            harness.test_function(
+                &mut executor,
                 &format!("get_u{}_max", config.size),
+                &[],
+                Some(&config.u_max.clone()),
+            );
+            harness.test_function(
+                &mut executor,
+                &format!("get_u{}_const_max", config.size),
                 &[],
                 Some(&config.u_max.clone()),
             );
@@ -862,9 +878,23 @@ fn test_numeric_sizes() {
                 &[],
                 Some(&config.i_min.clone()),
             );
+
+            harness.test_function(
+                &mut executor,
+                &format!("get_i{}_const_min", config.size),
+                &[],
+                Some(&config.i_min.clone()),
+            );
             harness.test_function(
                 &mut executor,
                 &format!("get_i{}_max", config.size),
+                &[],
+                Some(&config.i_max.clone()),
+            );
+
+            harness.test_function(
+                &mut executor,
+                &format!("get_i{}_const_max", config.size),
                 &[],
                 Some(&config.i_max.clone()),
             );
@@ -913,7 +943,6 @@ fn checked_arithmetic() {
             // ADDITION
 
             // unsigned: max_value + 1 fails
-
             harness.test_function_reverts(
                 &mut executor,
                 &format!("add_u{}", config.size),
@@ -1274,6 +1303,35 @@ fn structs() {
 }
 
 #[test]
+fn return_complex_struct() {
+    with_executor(&|mut executor| {
+        let harness = deploy_contract(&mut executor, "return_complex_struct.fe", "Foo", &[]);
+
+        let static_inner = tuple_token(&[int_token(10), int_token(20)]);
+        let static_complex = tuple_token(&[static_inner, int_token(30)]);
+        harness.test_function(&mut executor, "static_complex", &[], Some(&static_complex));
+
+        let string = string_token("Hello");
+        let string_complex = tuple_token(&[string, int_token(30)]);
+        harness.test_function(&mut executor, "string_complex", &[], Some(&string_complex));
+
+        let bytes = ethabi::Token::Bytes(ethabi::Bytes::from([1, 2, 3, 4, 5, 6, 7, 8]));
+        let bytes_complex = tuple_token(&[bytes, int_token(30)]);
+        harness.test_function(&mut executor, "bytes_complex", &[], Some(&bytes_complex));
+
+        let nested_dynamic_complex = tuple_token(&[bytes_complex, static_complex, string_complex]);
+        harness.test_function(
+            &mut executor,
+            "nested_dynamic_complex",
+            &[],
+            Some(&nested_dynamic_complex),
+        );
+
+        assert_harness_gas_report!(harness);
+    });
+}
+
+#[test]
 fn keccak() {
     with_executor(&|mut executor| {
         let harness = deploy_contract(&mut executor, "keccak.fe", "Keccak", &[]);
@@ -1600,7 +1658,7 @@ fn abi_decode_checks() {
             harness.test_call_reverts(&mut executor, tampered_data, &revert_data);
         }
 
-        // decode_u128_bool
+        // // decode_u128_bool
         {
             let input = [uint_token(99999999), bool_token(true)];
             let data = harness.build_calldata("decode_u128_bool", &input);
@@ -1739,8 +1797,8 @@ fn abi_decode_checks() {
             // this would break the equivalence of string's `data_offset + data_size` and
             // the bytes' `data_offset`, making the encoding invalid
             tampered_data[byte_index] = 33;
-            // the string length is completely valid otherwise. 32 for example will not revert
-            // tampered_data[byte_index] = 32;
+            // the string length is completely valid otherwise. 32 for example will not
+            // revert tampered_data[byte_index] = 32;
             harness.test_call_reverts(&mut executor, tampered_data, &revert_data);
 
             // place non-zero byte in padded region of the string
@@ -1797,6 +1855,70 @@ fn abi_decode_checks() {
 }
 
 #[test]
+fn abi_decode_complex() {
+    with_executor(&|mut executor| {
+        let harness = deploy_contract(&mut executor, "abi_decode_complex.fe", "Foo", &[]);
+
+        let static_inner = tuple_token(&[int_token(10), int_token(20)]);
+        let static_complex = tuple_token(&[static_inner, int_token(30)]);
+        harness.test_function(
+            &mut executor,
+            "decode_static_complex",
+            &[static_complex.clone()],
+            Some(&static_complex),
+        );
+
+        let string = string_token("Hello");
+        let string_complex = tuple_token(&[string, int_token(30)]);
+        harness.test_function(
+            &mut executor,
+            "decode_string_complex",
+            &[string_complex.clone()],
+            Some(&string_complex),
+        );
+
+        let bytes = ethabi::Token::Bytes(ethabi::Bytes::from([1, 2, 3, 4, 5, 6, 7, 8]));
+        let bytes_complex = tuple_token(&[bytes, int_token(30)]);
+        harness.test_function(
+            &mut executor,
+            "decode_bytes_complex",
+            &[bytes_complex.clone()],
+            Some(&bytes_complex),
+        );
+
+        let nested_dynamic_complex =
+            tuple_token(&[bytes_complex, static_complex.clone(), string_complex]);
+        harness.test_function(
+            &mut executor,
+            "decode_nested_dynamic_complex",
+            &[nested_dynamic_complex.clone()],
+            Some(&nested_dynamic_complex),
+        );
+
+        let static_complex_array =
+            ethabi::Token::FixedArray(std::iter::repeat(static_complex).take(3).collect());
+        harness.test_function(
+            &mut executor,
+            "decode_static_complex_elem_array",
+            &[static_complex_array.clone()],
+            Some(&static_complex_array),
+        );
+
+        let dynamic_complex_array =
+            ethabi::Token::FixedArray(std::iter::repeat(nested_dynamic_complex).take(3).collect());
+        dbg!(ethabi::encode(&[dynamic_complex_array.clone()]).len());
+        harness.test_function(
+            &mut executor,
+            "decode_dynamic_complex_elem_array",
+            &[dynamic_complex_array.clone()],
+            Some(&dynamic_complex_array),
+        );
+
+        assert_harness_gas_report!(harness);
+    });
+}
+
+#[test]
 fn intrinsics() {
     with_executor(&|mut executor| {
         let harness = deploy_contract(&mut executor, "intrinsics.fe", "Intrinsics", &[]);
@@ -1820,9 +1942,7 @@ fn intrinsics() {
             Some(&uint_token(32)),
         );
         harness.test_function(&mut executor, "callvalue", &[], Some(&uint_token(0)));
-
-        // TODO: need an evm update for the basefee opcode
-        // harness.test_function(&mut executor, "basefee", &[], Some(&uint_token(0)));
+        harness.test_function(&mut executor, "basefee", &[], Some(&uint_token(0)));
 
         harness.test_function(
             &mut executor,
@@ -1942,5 +2062,35 @@ fn ctx_init_in_call() {
             Capture::Exit(_) => panic!("call didn't succeed"),
             Capture::Trap(_) => panic!("trapped!"),
         }
+    });
+}
+
+// These tests are expected to make assertions in Fe only
+#[rstest(
+    fixture_file,
+    case::simple_traits("simple_traits.fe"),
+    case::generic_functions("generic_functions.fe"),
+    case::generic_functions_primitves("generic_functions_primitves.fe")
+)]
+fn execution_tests(fixture_file: &str) {
+    with_executor(&|mut executor| {
+        let harness = deploy_contract(&mut executor, fixture_file, "Example", &[]);
+        harness.test_function(&mut executor, "run_test", &[], None);
+        assert_harness_gas_report!(harness);
+    })
+}
+
+#[test]
+fn array_repeat() {
+    with_executor(&|mut executor| {
+        let harness = deploy_contract(&mut executor, "array_repeat.fe", "Foo", &[]);
+        harness.test_function(
+            &mut executor,
+            "foo",
+            &[],
+            Some(&uint_array_token(&[8, 42, 8, 8])),
+        );
+
+        harness.test_function(&mut executor, "bar", &[], None);
     });
 }

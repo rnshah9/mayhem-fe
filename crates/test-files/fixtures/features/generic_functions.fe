@@ -1,0 +1,42 @@
+trait Computable {
+  fn compute(self, val: u256) -> u256;
+}
+
+struct Mac {}
+
+impl Computable for Mac {
+  fn compute(self, val: u256) -> u256 {
+    return 1 + val
+  }
+}
+
+struct Linux {
+  pub counter: u256
+  pub fn get_counter(self) -> u256 {
+    return self.counter
+  }
+  pub fn something_static() -> u256 {
+    return 5
+  }
+}
+
+impl Computable for Linux {
+  fn compute(self, val: u256) -> u256 {
+    return val + Linux::something_static() + self.get_counter()
+  }
+}
+
+struct Runner {
+
+  pub fn run<T: Computable>(self, _ val: T) -> u256 {
+    return val.compute(val: 1000)
+  }
+}
+
+contract Example {
+  pub fn run_test(self) {
+    let runner: Runner = Runner();
+    assert runner.run(Mac()) == 1001
+    assert runner.run(Linux(counter: 10)) == 1015
+  }
+}

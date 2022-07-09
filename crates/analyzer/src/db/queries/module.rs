@@ -1,13 +1,14 @@
 use crate::context::{Analysis, AnalyzerContext, Constant};
-use crate::db::AnalyzerDb;
+use crate::display::Displayable;
 use crate::errors::{self, ConstEvalError, TypeError};
 use crate::namespace::items::{
-    Contract, ContractId, Event, Function, Item, ModuleConstant, ModuleConstantId, ModuleId,
-    ModuleSource, Struct, StructId, TypeAlias, TypeDef,
+    Contract, ContractId, Event, Function, Impl, ImplId, Item, ModuleConstant, ModuleConstantId,
+    ModuleId, ModuleSource, Struct, StructId, Trait, TraitId, TypeAlias, TypeDef,
 };
 use crate::namespace::scopes::ItemScope;
-use crate::namespace::types::{self, Type};
+use crate::namespace::types::{self, TypeId};
 use crate::traversal::{const_expr, expressions, types::type_desc};
+use crate::AnalyzerDb;
 use fe_common::diagnostics::Label;
 use fe_common::files::Utf8Path;
 use fe_common::Span;
@@ -21,7 +22,6 @@ pub fn module_file_path(db: &dyn AnalyzerDb, module: ModuleId) -> SmolStr {
     let full_path = match &module.data(db).source {
         ModuleSource::File(file) => file.path(db.upcast()).as_str().into(),
         ModuleSource::Dir(path) => path.clone(),
-        ModuleSource::Lowered { original, .. } => return db.module_file_path(*original),
     };
 
     let src_prefix = &module.ingot(db).data(db).src_dir;
@@ -43,7 +43,6 @@ pub fn module_parse(db: &dyn AnalyzerDb, module: ModuleId) -> Analysis<Rc<ast::M
             // Directory with no corresponding source file. Return empty ast.
             Analysis::new(ast::Module { body: vec![] }.into(), vec![].into())
         }
-        ModuleSource::Lowered { .. } => panic!("module_parse called on lowered module"),
     }
 }
 
@@ -61,7 +60,6 @@ pub fn module_is_incomplete(db: &dyn AnalyzerDb, module: ModuleId) -> bool {
 
 pub fn module_all_items(db: &dyn AnalyzerDb, module: ModuleId) -> Rc<[Item]> {
     let body = &module.ast(db).body;
-
     body.iter()
         .filter_map(|stmt| match stmt {
             ast::ModuleStmt::TypeAlias(node) => Some(Item::Type(TypeDef::Alias(
@@ -89,21 +87,49 @@ pub fn module_all_items(db: &dyn AnalyzerDb, module: ModuleId) -> Rc<[Item]> {
                     module,
                 }),
             ))),
-            ast::ModuleStmt::Function(node) => {
-                Some(Item::Function(db.intern_function(Rc::new(Function {
-                    ast: node.clone(),
-                    module,
-                    parent: None,
-                }))))
-            }
-            ast::ModuleStmt::Pragma(_) => None,
-            ast::ModuleStmt::Use(_) => None,
+            ast::ModuleStmt::Function(node) => Some(Item::Function(
+                db.intern_function(Rc::new(Function::new(db, node, None, module))),
+            )),
+            ast::ModuleStmt::Trait(node) => Some(Item::Trait(db.intern_trait(Rc::new(Trait {
+                ast: node.clone(),
+                module,
+            })))),
+            ast::ModuleStmt::Pragma(_) | ast::ModuleStmt::Use(_) | ast::ModuleStmt::Impl(_) => None,
             ast::ModuleStmt::Event(node) => Some(Item::Event(db.intern_event(Rc::new(Event {
                 ast: node.clone(),
                 module,
                 contract: None,
             })))),
             ast::ModuleStmt::ParseError(_) => None,
+        })
+        .collect()
+}
+
+pub fn module_all_impls(db: &dyn AnalyzerDb, module: ModuleId) -> Rc<[ImplId]> {
+    let body = &module.ast(db).body;
+    body.iter()
+        .filter_map(|stmt| match stmt {
+            ast::ModuleStmt::Impl(impl_node) => {
+                let treit = module
+                    .items(db)
+                    .get(&impl_node.kind.impl_trait.kind)
+                    .cloned();
+
+                let mut scope = ItemScope::new(db, module);
+                let receiver_type = type_desc(&mut scope, &impl_node.kind.receiver).unwrap();
+
+                if let Some(Item::Trait(val)) = treit {
+                    Some(db.intern_impl(Rc::new(Impl {
+                        trait_id: val,
+                        receiver: receiver_type,
+                        ast: impl_node.clone(),
+                        module,
+                    })))
+                } else {
+                    None
+                }
+            }
+            _ => None,
         })
         .collect()
 }
@@ -206,6 +232,37 @@ pub fn module_item_map(
     )
 }
 
+pub fn module_impl_map(
+    db: &dyn AnalyzerDb,
+    module: ModuleId,
+) -> Analysis<Rc<IndexMap<(TraitId, TypeId), ImplId>>> {
+    let scope = ItemScope::new(db, module);
+    let mut map = IndexMap::<(TraitId, TypeId), ImplId>::new();
+
+    for impl_ in db.module_all_impls(module).iter() {
+        let key = &(impl_.trait_id(db), impl_.receiver(db));
+
+        match map.entry(*key) {
+            Entry::Occupied(entry) => {
+                scope.duplicate_name_error(
+                    &format!(
+                        "duplicate `impl` blocks for trait `{}` for type `{}`",
+                        key.0.name(db),
+                        key.1.display(db)
+                    ),
+                    "",
+                    entry.get().ast(db).span,
+                    impl_.ast(db).span,
+                );
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(*impl_);
+            }
+        }
+    }
+    Analysis::new(Rc::new(map), scope.diagnostics.take().into())
+}
+
 pub fn module_contracts(db: &dyn AnalyzerDb, module: ModuleId) -> Rc<[ContractId]> {
     module
         .all_items(db)
@@ -251,29 +308,32 @@ pub fn module_constants(db: &dyn AnalyzerDb, module: ModuleId) -> Rc<Vec<ModuleC
 pub fn module_constant_type(
     db: &dyn AnalyzerDb,
     constant: ModuleConstantId,
-) -> Analysis<Result<types::Type, TypeError>> {
+) -> Analysis<Result<types::TypeId, TypeError>> {
     let constant_data = constant.data(db);
     let mut scope = ItemScope::new(db, constant.data(db).module);
     let typ = type_desc(&mut scope, &constant_data.ast.kind.typ);
 
     match &typ {
-        Ok(typ) if !matches!(typ, Type::Base(_)) => {
+        Ok(typ) if !typ.is_base(db) => {
             scope.error(
                 "Non-base types not yet supported for constants",
                 constant.data(db).ast.kind.typ.span,
-                &format!("this has type `{}`; expected a primitive type", typ),
+                &format!(
+                    "this has type `{}`; expected a primitive type",
+                    typ.display(db)
+                ),
             );
         }
         Ok(typ) => {
             if let Ok(expr_attr) =
-                expressions::assignable_expr(&mut scope, &constant_data.ast.kind.value, Some(typ))
+                expressions::assignable_expr(&mut scope, &constant_data.ast.kind.value, Some(*typ))
             {
                 if typ != &expr_attr.typ {
                     scope.type_error(
                         "type mismatch",
                         constant_data.ast.kind.value.span,
-                        &typ,
-                        &expr_attr.typ,
+                        *typ,
+                        expr_attr.typ,
                     );
                 }
             }
@@ -288,7 +348,7 @@ pub fn module_constant_type_cycle(
     db: &dyn AnalyzerDb,
     _cycle: &[String],
     constant: &ModuleConstantId,
-) -> Analysis<Result<Type, TypeError>> {
+) -> Analysis<Result<TypeId, TypeError>> {
     let mut context = ItemScope::new(db, constant.data(db).module);
     let err = Err(TypeError::new(context.error(
         "recursive constant value definition",
@@ -325,7 +385,7 @@ pub fn module_constant_value(
     };
 
     if let Err(err) =
-        expressions::assignable_expr(&mut scope, &constant_data.ast.kind.value, Some(&typ))
+        expressions::assignable_expr(&mut scope, &constant_data.ast.kind.value, Some(typ))
     {
         // No need to emit diagnostics, it's already emitted in `module_constant_type`.
         return Analysis {

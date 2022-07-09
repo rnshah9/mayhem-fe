@@ -6,22 +6,10 @@ expression: "build_snapshot(&db, module)"
 note: 
   ┌─ create2_contract.fe:4:5
   │  
-4 │ ╭     pub fn get_my_num() -> u256:
+4 │ ╭     pub fn get_my_num() -> u256 {
 5 │ │         return 42
-  │ ╰─────────────────^ attributes hash: 6115314201970082834
-  │  
-  = FunctionSignature {
-        self_decl: None,
-        ctx_decl: None,
-        params: [],
-        return_type: Ok(
-            Base(
-                Numeric(
-                    U256,
-                ),
-            ),
-        ),
-    }
+6 │ │     }
+  │ ╰─────^ self: None, params: [] -> u256
 
 note: 
   ┌─ create2_contract.fe:5:16
@@ -30,67 +18,41 @@ note:
   │                ^^ u256: Value
 
 note: 
-   ┌─ create2_contract.fe:8:5
+   ┌─ create2_contract.fe:10:5
    │  
- 8 │ ╭     pub fn create2_foo(ctx: Context) -> address:
- 9 │ │         # value and salt
-10 │ │         let foo: Foo = Foo.create2(ctx, 0, 52)
-11 │ │         return address(foo)
-   │ ╰───────────────────────────^ attributes hash: 9364783648076633772
-   │  
-   = FunctionSignature {
-         self_decl: None,
-         ctx_decl: Some(
-             Mutable,
-         ),
-         params: [
-             FunctionParam {
-                 label: None,
-                 name: "ctx",
-                 typ: Ok(
-                     Struct(
-                         Struct {
-                             name: "Context",
-                             field_count: 0,
-                         },
-                     ),
-                 ),
-             },
-         ],
-         return_type: Ok(
-             Base(
-                 Address,
-             ),
-         ),
-     }
+10 │ ╭     pub fn create2_foo(ctx: Context) -> address {
+11 │ │         let foo: Foo = Foo.create2(ctx, 0, 52)
+12 │ │         return address(foo)
+13 │ │     }
+   │ ╰─────^ self: None, params: [{ label: None, name: ctx, typ: Context }] -> address
 
 note: 
-   ┌─ create2_contract.fe:10:18
+   ┌─ create2_contract.fe:11:13
    │
-10 │         let foo: Foo = Foo.create2(ctx, 0, 52)
-   │                  ^^^ Foo
+11 │         let foo: Foo = Foo.create2(ctx, 0, 52)
+   │             ^^^ Foo
 
 note: 
-   ┌─ create2_contract.fe:10:36
+   ┌─ create2_contract.fe:11:36
    │
-10 │         let foo: Foo = Foo.create2(ctx, 0, 52)
+11 │         let foo: Foo = Foo.create2(ctx, 0, 52)
    │                                    ^^^  ^  ^^ u256: Value
    │                                    │    │   
    │                                    │    u256: Value
    │                                    Context: Memory
 
 note: 
-   ┌─ create2_contract.fe:10:24
+   ┌─ create2_contract.fe:11:24
    │
-10 │         let foo: Foo = Foo.create2(ctx, 0, 52)
+11 │         let foo: Foo = Foo.create2(ctx, 0, 52)
    │                        ^^^^^^^^^^^^^^^^^^^^^^^ Foo: Value
-11 │         return address(foo)
+12 │         return address(foo)
    │                        ^^^ Foo: Value
 
 note: 
-   ┌─ create2_contract.fe:11:16
+   ┌─ create2_contract.fe:12:16
    │
-11 │         return address(foo)
+12 │         return address(foo)
    │                ^^^^^^^^^^^^ address: Value
 
 

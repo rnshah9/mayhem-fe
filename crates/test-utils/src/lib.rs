@@ -2,7 +2,6 @@ use evm_runtime::{ExitReason, Handler};
 use fe_common::diagnostics::print_diagnostics;
 use fe_common::utils::keccak;
 use fe_driver as driver;
-use fe_yulgen::runtime::functions;
 use primitive_types::{H160, U256};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -68,10 +67,10 @@ impl ToBeBytes for U256 {
 pub type Backend<'a> = evm::backend::MemoryBackend<'a>;
 
 #[allow(dead_code)]
-pub type StackState<'a> = evm::executor::MemoryStackState<'a, 'a, Backend<'a>>;
+pub type StackState<'a> = evm::executor::stack::MemoryStackState<'a, 'a, Backend<'a>>;
 
 #[allow(dead_code)]
-pub type Executor<'a> = evm::executor::StackExecutor<'a, StackState<'a>>;
+pub type Executor<'a, 'b> = evm::executor::stack::StackExecutor<'a, 'b, StackState<'a>, ()>;
 
 #[allow(dead_code)]
 pub const DEFAULT_CALLER: &str = "1000000000000000000000000000000000000001";
@@ -254,6 +253,7 @@ pub fn with_executor(test: &dyn Fn(Executor)) {
         block_timestamp: U256::zero(),
         block_difficulty: U256::zero(),
         block_gas_limit: primitive_types::U256::MAX,
+        block_base_fee_per_gas: U256::zero(),
     };
     let state: BTreeMap<primitive_types::H160, evm::backend::MemoryAccount> = BTreeMap::new();
     let backend = evm::backend::MemoryBackend::new(&vicinity, state);
@@ -263,12 +263,12 @@ pub fn with_executor(test: &dyn Fn(Executor)) {
 
 #[allow(dead_code)]
 pub fn with_executor_backend(backend: Backend, test: &dyn Fn(Executor)) {
-    let config = evm::Config::istanbul();
+    let config = evm::Config::london();
     let stack_state = StackState::new(
-        evm::executor::StackSubstateMetadata::new(u64::MAX, &config),
+        evm::executor::stack::StackSubstateMetadata::new(u64::MAX, &config),
         &backend,
     );
-    let executor = Executor::new(stack_state, &config);
+    let executor = Executor::new_with_precompiles(stack_state, &config, &());
 
     test(executor)
 }
@@ -475,7 +475,11 @@ fn _deploy_contract(
         bytecode,
         None,
     ) {
-        return ContractHarness::new(exit.1.expect("Unable to retrieve contract address"), abi);
+        return ContractHarness::new(
+            exit.1
+                .unwrap_or_else(|| panic!("Unable to retrieve contract address: {:?}", exit.0)),
+            abi,
+        );
     }
 
     panic!("Failed to create contract")
@@ -597,7 +601,7 @@ pub struct Runtime {
 
 impl Default for Runtime {
     fn default() -> Self {
-        Self::new().with_functions(functions::std())
+        Self::new()
     }
 }
 

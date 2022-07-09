@@ -1,9 +1,22 @@
 use fe_analyzer::namespace::items as analyzer_items;
+use fe_analyzer::namespace::types as analyzer_types;
 use fe_common::{impl_intern_key, Span};
 use smol_str::SmolStr;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum Type {
+pub struct Type {
+    pub kind: TypeKind,
+    pub analyzer_ty: Option<analyzer_types::TypeId>,
+}
+
+impl Type {
+    pub fn new(kind: TypeKind, analyzer_ty: Option<analyzer_types::TypeId>) -> Self {
+        Self { kind, analyzer_ty }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum TypeKind {
     I8,
     I16,
     I32,
@@ -20,16 +33,20 @@ pub enum Type {
     Address,
     Unit,
     Array(ArrayDef),
+    // TODO: we should consider whether we really need `String` type.
+    String(usize),
     Tuple(TupleDef),
     Struct(StructDef),
     Event(EventDef),
     Contract(StructDef),
     Map(MapDef),
+    MPtr(TypeId),
+    SPtr(TypeId),
 }
 
 /// An interned Id for [`ArrayDef`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TypeId(pub(crate) u32);
+pub struct TypeId(pub u32);
 impl_intern_key!(TypeId);
 
 /// A static array type definition.

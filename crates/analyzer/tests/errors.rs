@@ -81,7 +81,7 @@ macro_rules! test_stmt {
         #[wasm_bindgen_test]
         fn $name() {
             let src = format!(
-                "contract C:\n pub fn f(self):\n  {}",
+                "contract C {{\n pub fn f(self) {{\n  {}\n }}\n}}",
                 $stmt.replace('\n', "\n  ")
             );
             if cfg!(target_arch = "wasm32") {
@@ -96,28 +96,6 @@ macro_rules! test_stmt {
     };
 }
 
-macro_rules! test_stmt_unsafe {
-    ($name:ident, $stmt:expr) => {
-        #[test]
-        #[wasm_bindgen_test]
-        fn $name() {
-            let src = format!(
-                "contract C:\n pub fn f(self):\n  unsafe:\n    {}",
-                $stmt.replace('\n', "\n  ")
-            );
-            if cfg!(target_arch = "wasm32") {
-                fe_common::assert_snapshot_wasm!(
-                    concat!("snapshots/errors__", stringify!($name), ".snap"),
-                    error_string("[snippet]", &src)
-                );
-            } else {
-                assert_snapshot!(error_string("[snippet]", &src));
-            }
-        }
-    };
-}
-
-test_stmt! { array_non_primitive, "let x: Array<(u8, u8), 10>" }
 test_stmt! { array_mixed_types, "let x: Array<u16, 3> = [1, address(0), \"hi\"]" }
 test_stmt! { array_size_mismatch, "let x: Array<u8, 3> = []\nlet y: Array<u8, 3> = [1, 2]" }
 test_stmt! { array_constructor_call, "u8[3]([1, 2, 3])" }
@@ -136,22 +114,23 @@ test_stmt! { binary_op_boolean_mismatch3, "1 or 2" }
 test_stmt! { bool_constructor, "bool(true)" }
 test_stmt! { bool_cast, "bool(0)" }
 test_stmt! { break_without_loop, "break" }
-test_stmt! { break_without_loop_2, "if true:\n  break" }
+test_stmt! { break_without_loop_2, "if true { break }" }
 test_stmt! { call_undefined_function_on_contract, "self.doesnt_exist()" }
 test_stmt! { call_address_with_wrong_type, "address(true)" }
+test_stmt! { call_address_with_label, "address(val: 0)" }
 test_stmt! { call_keccak_without_parameter, "keccak256()" }
 test_stmt! { call_keccak_with_wrong_type, "keccak256(true)" }
 test_stmt! { call_keccak_with_2_args, "keccak256(1, 2)" }
 test_stmt! { call_keccak_with_generic_args, "keccak256<10>(1)" }
 test_stmt! { cast_address_to_u64, "u64(address(0))" }
 
-test_stmt_unsafe! { call_balance_of_without_parameter, "std::evm::balance_of()" }
-test_stmt_unsafe! { call_balance_of_with_wrong_type, "std::evm::balance_of(true)" }
-test_stmt_unsafe! { call_balance_of_with_2_args, "std::evm::balance_of(address(0), 2)" }
-test_stmt_unsafe! { call_balance_with_arg, "std::evm::balance(address(0))" }
+test_stmt! { call_balance_of_without_parameter, "unsafe { std::evm::balance_of() }" }
+test_stmt! { call_balance_of_with_wrong_type, "unsafe { std::evm::balance_of(true) }" }
+test_stmt! { call_balance_of_with_2_args, "unsafe { std::evm::balance_of(address(0), 2) }" }
+test_stmt! { call_balance_with_arg, "unsafe { std::evm::balance(address(0)) }" }
 test_stmt! { clone_arg_count, "let x: Array<u256, 2> = [5, 6]\nlet y: Array<u256, 2> = x.clone(y)" }
 test_stmt! { continue_without_loop, "continue" }
-test_stmt! { continue_without_loop_2, "if true:\n  continue" }
+test_stmt! { continue_without_loop_2, "if true { continue }" }
 test_stmt! { emit_undefined_event, "emit MyEvent()" }
 test_stmt! { emit_type_name, "emit u8()" }
 test_stmt! { emit_variable, "let x: u8 = 10\nemit x()" }
@@ -221,8 +200,10 @@ test_stmt! { change_sign_and_type_in_cast, "let x: bool\nlet y: u16 = u16(x)" }
 test_stmt! { type_constructor_arg_count, "let x: u8 = u8(1, 10)" }
 test_stmt! { unary_minus_on_bool, "let x: bool = true\n-x" }
 test_stmt! { unary_not_on_int, "let x: u256 = 10\nnot x" }
+test_stmt! { unary_always_mismatch_type_case_1, "let x:u256 = 10\nlet y:u256 = -x"}
+test_stmt! { unary_always_mismatch_type_case_2, "let x:i32 = -10\nlet y:u256 = -x"}
 test_stmt! { undefined_generic_type, "let x: foobar<u256> = 10" }
-test_stmt! { undefined_name, "let x: u16 = y\nlet z: u16 = y" }
+test_stmt! { undefined_name, "let x: u16 = y\nlet z: u16 = y\nlet v: u16 = _42" }
 test_stmt! { undefined_type, "let x: foobar = 10" }
 test_stmt! { unexpected_return, "return 1" }
 test_stmt! { unit_type_constructor, "()()" }
@@ -230,14 +211,19 @@ test_stmt! { revert_reason_not_struct, "revert 1" }
 test_stmt! { invalid_ascii, "String<2>(\"ä\")" }
 test_stmt! { invert_non_numeric, "~true" }
 
+test_file! { ambiguous_traits }
+test_file! { ambiguous_traits2 }
+test_ingot! { trait_not_in_scope }
 test_file! { bad_string }
 test_file! { bad_tuple_attr1 }
 test_file! { bad_tuple_attr2 }
 test_file! { bad_tuple_attr3 }
+test_file! { call_generic_function_with_unsatisfied_bound}
 test_file! { call_builtin_object }
 test_file! { call_create_with_wrong_type }
 test_file! { call_create2_with_wrong_type }
 test_file! { call_event_with_wrong_types }
+test_file! { call_static_function_without_double_colon }
 test_file! { call_undefined_function_on_external_contract }
 test_file! { call_undefined_function_on_memory_struct }
 test_file! { call_undefined_function_on_storage_struct }
@@ -261,14 +247,19 @@ test_file! { duplicate_typedef_in_module }
 test_file! { duplicate_var_in_child_scope }
 test_file! { duplicate_var_in_contract_method }
 test_file! { duplicate_var_in_for_loop }
+test_file! { duplicate_generic_params }
 test_file! { emit_bad_args }
 test_file! { external_call_type_error }
 test_file! { external_call_wrong_number_of_params }
+test_file! { contract_function_with_generic_params }
 test_file! { indexed_event }
 test_file! { invalid_compiler_version }
 test_file! { invalid_block_field }
 test_file! { invalid_chain_field }
 test_file! { invalid_contract_field }
+test_file! { invalid_generic_bound }
+test_file! { invalid_impl_type }
+test_file! { invalid_impl_location }
 test_file! { invalid_msg_field }
 test_file! { invalid_string_field }
 test_file! { invalid_struct_field }
@@ -298,7 +289,6 @@ test_file! { return_call_to_fn_without_return }
 test_file! { return_from_init }
 test_file! { return_lt_mixed_types }
 test_file! { return_type_undefined }
-test_file! { return_complex_struct }
 test_file! { return_type_not_fixedsize }
 test_file! { undefined_type_param }
 
@@ -306,6 +296,13 @@ test_file! { strict_boolean_if_else }
 test_file! { struct_private_constructor }
 test_file! { struct_call_bad_args }
 test_file! { struct_call_without_kw_args }
+test_file! { struct_recursive_cycles }
+test_file! { trait_impl_mismatch }
+test_file! { trait_fn_without_self }
+test_file! { trait_fn_with_generic_params }
+test_file! { traits_as_fields }
+test_file! { trait_conflicting_impls }
+test_file! { traits_with_wrong_bounds }
 test_file! { non_pub_init }
 test_file! { init_wrong_return_type }
 test_file! { init_duplicate_def }
@@ -340,12 +337,12 @@ test_file! { ctx_init }
 test_file! { ctx_pure }
 test_file! { ctx_undeclared }
 test_file! { ctx_missing_internal_call }
-test_file! { ctx_passed_external_call }
 test_file! { ctx_missing_create }
 test_file! { ctx_missing_load }
 test_file! { ctx_missing_event }
 test_file! { ctx_builtins_param_incorrect_type }
-test_file! { ctx_undefined_contract_init }
 test_file! { ctx_undefined_create }
 test_file! { ctx_undefined_create2 }
 test_file! { ctx_undefined_event }
+test_file! { uninit_values }
+test_file! { invalid_repeat_length }

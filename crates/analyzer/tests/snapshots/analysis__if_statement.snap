@@ -4,57 +4,34 @@ expression: "build_snapshot(&db, module)"
 
 ---
 note: 
-  ┌─ if_statement.fe:3:5
+  ┌─ if_statement.fe:2:5
   │  
-3 │ ╭     pub fn bar(input: u256) -> u256:
-4 │ │         if input > 5:
-5 │ │             return 1
-6 │ │         else:
-7 │ │             return 0
-  │ ╰────────────────────^ attributes hash: 10660199954095577886
-  │  
-  = FunctionSignature {
-        self_decl: None,
-        ctx_decl: None,
-        params: [
-            FunctionParam {
-                label: None,
-                name: "input",
-                typ: Ok(
-                    Base(
-                        Numeric(
-                            U256,
-                        ),
-                    ),
-                ),
-            },
-        ],
-        return_type: Ok(
-            Base(
-                Numeric(
-                    U256,
-                ),
-            ),
-        ),
-    }
+2 │ ╭     pub fn bar(input: u256) -> u256 {
+3 │ │         if input > 5 {
+4 │ │             return 1
+5 │ │         } else {
+6 │ │             return 0
+7 │ │         }
+8 │ │     }
+  │ ╰─────^ self: None, params: [{ label: None, name: input, typ: u256 }] -> u256
 
 note: 
-  ┌─ if_statement.fe:4:12
+  ┌─ if_statement.fe:3:12
   │
-4 │         if input > 5:
+3 │         if input > 5 {
   │            ^^^^^   ^ u256: Value
   │            │        
   │            u256: Value
 
 note: 
-  ┌─ if_statement.fe:4:12
+  ┌─ if_statement.fe:3:12
   │
-4 │         if input > 5:
+3 │         if input > 5 {
   │            ^^^^^^^^^ bool: Value
-5 │             return 1
+4 │             return 1
   │                    ^ u256: Value
-6 │         else:
-7 │             return 0
+5 │         } else {
+6 │             return 0
   │                    ^ u256: Value
 
 

@@ -1,6 +1,0 @@
-contract Bar:
-    pass
-
-contract Foo:
-    pub fn baz():
-        Bar(address(0))

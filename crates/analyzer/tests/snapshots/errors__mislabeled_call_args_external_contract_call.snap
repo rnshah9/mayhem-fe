@@ -3,16 +3,30 @@ source: crates/analyzer/tests/errors.rs
 expression: "error_string(&path, test_files::fixture(path))"
 
 ---
-error: argument label mismatch
-   ┌─ compile_errors/mislabeled_call_args_external_contract_call.fe:11:30
+error: `Foo` expects 1 argument, but 2 were provided
+   ┌─ compile_errors/mislabeled_call_args_external_contract_call.fe:11:9
    │
-11 │     Foo(ctx, address(0)).baz(doesnt_exist: 1, me_neither: 4)
-   │                              ^^^^^^^^^^^^ expected `val1`
+11 │         Foo(ctx, address(0)).baz(doesnt_exist: 1, me_neither: 4)
+   │         ^^^ ---  ---------- supplied 2 arguments
+   │         │         
+   │         expects 1 argument
+
+error: type mismatch
+   ┌─ compile_errors/mislabeled_call_args_external_contract_call.fe:11:13
+   │
+11 │         Foo(ctx, address(0)).baz(doesnt_exist: 1, me_neither: 4)
+   │             ^^^ this has type `Context`; expected type `address`
 
 error: argument label mismatch
-   ┌─ compile_errors/mislabeled_call_args_external_contract_call.fe:11:47
+   ┌─ compile_errors/mislabeled_call_args_external_contract_call.fe:11:34
    │
-11 │     Foo(ctx, address(0)).baz(doesnt_exist: 1, me_neither: 4)
-   │                                               ^^^^^^^^^^ expected `val2`
+11 │         Foo(ctx, address(0)).baz(doesnt_exist: 1, me_neither: 4)
+   │                                  ^^^^^^^^^^^^ expected `val1`
+
+error: argument label mismatch
+   ┌─ compile_errors/mislabeled_call_args_external_contract_call.fe:11:51
+   │
+11 │         Foo(ctx, address(0)).baz(doesnt_exist: 1, me_neither: 4)
+   │                                                   ^^^^^^^^^^ expected `val2`
 
 

@@ -1,15 +1,20 @@
 use fe_analyzer::namespace::items as analyzer_items;
+use fe_analyzer::namespace::types as analyzer_types;
 use fe_common::impl_intern_key;
 use fxhash::FxHashMap;
 use id_arena::Arena;
+use num_bigint::BigInt;
 use smol_str::SmolStr;
+use std::collections::BTreeMap;
+
+use crate::db::MirDb;
 
 use super::{
     basic_block::BasicBlock,
     body_order::BodyOrder,
-    inst::{BranchInfo, Inst, InstId},
-    types::TypeId,
-    value::{Immediate, Local, Value, ValueId},
+    inst::{BranchInfo, Inst, InstId, InstKind},
+    types::{TypeId, TypeKind},
+    value::{AssignableValue, Local, Value, ValueId},
     BasicBlockId, SourceInfo,
 };
 
@@ -17,7 +22,8 @@ use super::{
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FunctionSignature {
     pub params: Vec<FunctionParam>,
-    pub return_type: TypeId,
+    pub resolved_generics: BTreeMap<analyzer_types::Generic, analyzer_types::TypeId>,
+    pub return_type: Option<TypeId>,
     pub module_id: analyzer_items::ModuleId,
     pub analyzer_func_id: analyzer_items::FunctionId,
     pub linkage: Linkage,
@@ -31,8 +37,8 @@ pub struct FunctionParam {
     pub source: SourceInfo,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct FunctionId(pub(crate) u32);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FunctionId(pub u32);
 impl_intern_key!(FunctionId);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -49,9 +55,15 @@ pub enum Linkage {
     Export,
 }
 
+impl Linkage {
+    pub fn is_exported(self) -> bool {
+        self == Linkage::Export
+    }
+}
+
 /// A function body, which is not stored in salsa db to enable in-place
 /// transformation.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionBody {
     pub fid: FunctionId,
 
@@ -78,7 +90,7 @@ impl FunctionBody {
 
 /// A collection of basic block, instructions and values appear in a function
 /// body.
-#[derive(Default, Debug, PartialEq, Eq)]
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct BodyDataStore {
     /// Instructions appear in a function body.
     insts: Arena<Inst>,
@@ -90,12 +102,12 @@ pub struct BodyDataStore {
 
     /// Maps an immediate to a value to ensure the same immediate results in the
     /// same value.
-    immediates: FxHashMap<Immediate, ValueId>,
+    immediates: FxHashMap<(BigInt, TypeId), ValueId>,
 
     unit_value: Option<ValueId>,
 
     /// Maps an instruction to a value.
-    inst_results: FxHashMap<InstId, ValueId>,
+    inst_results: FxHashMap<InstId, AssignableValue>,
 
     /// All declared local variables in a function.
     locals: Vec<ValueId>,
@@ -110,11 +122,20 @@ impl BodyDataStore {
         &self.insts[inst]
     }
 
+    pub fn inst_data_mut(&mut self, inst: InstId) -> &mut Inst {
+        &mut self.insts[inst]
+    }
+
+    pub fn replace_inst(&mut self, inst: InstId, new: Inst) -> Inst {
+        let old = &mut self.insts[inst];
+        std::mem::replace(old, new)
+    }
+
     pub fn store_value(&mut self, value: Value) -> ValueId {
         match value {
-            Value::Immediate(imm) => self.store_immediate(imm),
+            Value::Immediate { imm, ty } => self.store_immediate(imm, ty),
 
-            Value::Unit(_) => {
+            Value::Unit { .. } => {
                 if let Some(unit_value) = self.unit_value {
                     unit_value
                 } else {
@@ -137,6 +158,10 @@ impl BodyDataStore {
         }
     }
 
+    pub fn is_nop(&self, inst: InstId) -> bool {
+        matches!(&self.inst_data(inst).kind, InstKind::Nop)
+    }
+
     pub fn is_terminator(&self, inst: InstId) -> bool {
         self.inst_data(inst).is_terminator()
     }
@@ -149,30 +174,99 @@ impl BodyDataStore {
         &self.values[value]
     }
 
+    pub fn value_data_mut(&mut self, value: ValueId) -> &mut Value {
+        &mut self.values[value]
+    }
+
+    pub fn values(&self) -> impl Iterator<Item = &Value> {
+        self.values.iter().map(|(_, value_data)| value_data)
+    }
+
+    pub fn values_mut(&mut self) -> impl Iterator<Item = &mut Value> {
+        self.values.iter_mut().map(|(_, value_data)| value_data)
+    }
+
     pub fn store_block(&mut self, block: BasicBlock) -> BasicBlockId {
         self.blocks.alloc(block)
     }
 
     /// Returns an instruction result. A returned value is guaranteed to be a
     /// temporary value.
-    pub fn inst_result(&self, inst: InstId) -> Option<ValueId> {
-        self.inst_results.get(&inst).copied()
+    pub fn inst_result(&self, inst: InstId) -> Option<&AssignableValue> {
+        self.inst_results.get(&inst)
+    }
+
+    pub fn rewrite_branch_dest(&mut self, inst: InstId, from: BasicBlockId, to: BasicBlockId) {
+        match &mut self.inst_data_mut(inst).kind {
+            InstKind::Jump { dest } => {
+                if *dest == from {
+                    *dest = to;
+                }
+            }
+            InstKind::Branch { then, else_, .. } => {
+                if *then == from {
+                    *then = to;
+                }
+                if *else_ == from {
+                    *else_ = to;
+                }
+            }
+            _ => unreachable!("inst is not a branch"),
+        }
+    }
+
+    pub fn remove_inst_result(&mut self, inst: InstId) {
+        self.inst_results.remove(&inst);
     }
 
     pub fn value_ty(&self, vid: ValueId) -> TypeId {
         self.values[vid].ty()
     }
 
-    pub fn replace_inst(&mut self, inst: InstId, new: Inst) {
-        self.insts[inst] = new;
+    pub fn assignable_value_ty(&self, db: &dyn MirDb, value: &AssignableValue) -> TypeId {
+        match value {
+            AssignableValue::Value(value) => self.value_ty(*value),
+            AssignableValue::Aggregate { lhs, idx } => {
+                let lhs = self.assignable_value_ty(db, lhs).deref(db);
+                lhs.projection_ty(db, self.value_data(*idx))
+            }
+            AssignableValue::Map { lhs, .. } => {
+                let lhs = self.assignable_value_ty(db, lhs).deref(db);
+                match &lhs.data(db).kind {
+                    TypeKind::Map(def) => def.value_ty,
+                    _ => unreachable!(),
+                }
+            }
+        }
     }
 
-    pub fn map_result(&mut self, inst: InstId, result: ValueId) {
+    pub fn map_result(&mut self, inst: InstId, result: AssignableValue) {
         self.inst_results.insert(inst, result);
     }
 
     pub fn locals(&self) -> &[ValueId] {
         &self.locals
+    }
+
+    pub fn locals_mut(&mut self) -> &[ValueId] {
+        &mut self.locals
+    }
+
+    pub fn func_args(&self) -> impl Iterator<Item = ValueId> + '_ {
+        self.locals()
+            .iter()
+            .filter(|value| match self.value_data(**value) {
+                Value::Local(local) => local.is_arg,
+                _ => unreachable!(),
+            })
+            .copied()
+    }
+
+    pub fn func_args_mut(&mut self) -> impl Iterator<Item = &mut Value> {
+        self.values_mut().filter(|value| match value {
+            Value::Local(local) => local.is_arg,
+            _ => false,
+        })
     }
 
     /// Returns Some(`local_name`) if value is `Value::Local`.
@@ -183,12 +277,19 @@ impl BodyDataStore {
         }
     }
 
-    fn store_immediate(&mut self, imm: Immediate) -> ValueId {
-        if let Some(value) = self.immediates.get(&imm) {
+    pub fn replace_value(&mut self, value: ValueId, to: Value) -> Value {
+        std::mem::replace(&mut self.values[value], to)
+    }
+
+    fn store_immediate(&mut self, imm: BigInt, ty: TypeId) -> ValueId {
+        if let Some(value) = self.immediates.get(&(imm.clone(), ty)) {
             *value
         } else {
-            let id = self.values.alloc(Value::Immediate(imm.clone()));
-            self.immediates.insert(imm, id);
+            let id = self.values.alloc(Value::Immediate {
+                imm: imm.clone(),
+                ty,
+            });
+            self.immediates.insert((imm, ty), id);
             id
         }
     }

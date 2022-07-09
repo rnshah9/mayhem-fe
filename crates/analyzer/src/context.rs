@@ -1,5 +1,9 @@
-use crate::namespace::items::{Class, ContractId, DiagnosticSink, EventId, FunctionId, Item};
-use crate::namespace::types::{FixedSize, SelfDecl, Struct, Type};
+use crate::display::Displayable;
+
+use crate::namespace::items::{
+    ContractId, DiagnosticSink, EventId, FunctionId, FunctionSigId, Item, TraitId,
+};
+use crate::namespace::types::{Generic, SelfDecl, Type, TypeId};
 use crate::AnalyzerDb;
 use crate::{
     builtins::{ContractTypeMethod, GlobalFunction, Intrinsic, ValueMethod},
@@ -15,10 +19,10 @@ use fe_common::Span;
 use fe_parser::ast;
 use fe_parser::node::{Node, NodeId};
 
-use indexmap::{IndexMap, IndexSet};
+use indexmap::IndexMap;
 use num_bigint::BigInt;
 use smol_str::SmolStr;
-use std::fmt::{self, Debug, Display};
+use std::fmt::{self, Debug};
 use std::hash::Hash;
 use std::marker::PhantomData;
 use std::rc::Rc;
@@ -134,14 +138,6 @@ pub trait AnalyzerContext {
     /// to determine whether a context is in a function.
     fn add_call(&self, node: &Node<ast::Expr>, call_type: CallType);
 
-    /// Store string literal to the current context.
-    ///
-    /// # Panics
-    ///
-    /// Panics if a context is not in a function. Use [`Self::is_in_function`]
-    /// to determine whether a context is in a function.
-    fn add_string(&self, str_lit: SmolStr);
-
     /// Returns `true` if the context is in function scope.
     fn is_in_function(&self) -> bool;
 
@@ -149,16 +145,21 @@ pub trait AnalyzerContext {
     fn inherits_type(&self, typ: BlockScopeType) -> bool;
 
     /// Returns the `Context` type, if it is defined.
-    fn get_context_type(&self) -> Option<Struct>;
+    fn get_context_type(&self) -> Option<TypeId>;
 
     fn type_error(
         &self,
         message: &str,
         span: Span,
-        expected: &dyn Display,
-        actual: &dyn Display,
+        expected: TypeId,
+        actual: TypeId,
     ) -> DiagnosticVoucher {
-        self.register_diag(errors::type_error(message, span, expected, actual))
+        self.register_diag(errors::type_error(
+            message,
+            span,
+            expected.display(self.db()),
+            actual.display(self.db()),
+        ))
     }
 
     fn not_yet_implemented(&self, feature: &str, span: Span) -> DiagnosticVoucher {
@@ -218,13 +219,13 @@ pub enum NamedThing {
 
         /// The function's parent, if any. If `None`, `self` has been
         /// used in a module-level function.
-        class: Option<Class>,
+        parent: Option<Item>,
         span: Option<Span>,
     },
     // SelfType // when/if we add a `Self` type keyword
     Variable {
         name: String,
-        typ: Result<FixedSize, TypeError>,
+        typ: Result<TypeId, TypeError>,
         is_const: bool,
         span: Span,
     },
@@ -322,10 +323,6 @@ impl AnalyzerContext for TempContext {
         panic!("TempContext can't add call");
     }
 
-    fn add_string(&self, _str_lit: SmolStr) {
-        panic!("TempContext can't store string literal")
-    }
-
     fn is_in_function(&self) -> bool {
         false
     }
@@ -338,7 +335,7 @@ impl AnalyzerContext for TempContext {
         self.diagnostics.borrow_mut().push(diag)
     }
 
-    fn get_context_type(&self) -> Option<Struct> {
+    fn get_context_type(&self) -> Option<TypeId> {
         panic!("TempContext can't resolve Context")
     }
 }
@@ -353,18 +350,19 @@ pub enum Location {
     },
     Memory,
     Value,
+    // An unresolved location is used for generic types prior to monomorphization.
+    Unresolved,
 }
 
 impl Location {
     /// The expected location of a value with the given type when being
     /// assigned, returned, or passed.
-    pub fn assign_location(typ: &FixedSize) -> Self {
+    pub fn assign_location(typ: &Type) -> Self {
         match typ {
-            FixedSize::Base(_) | FixedSize::Contract(_) => Location::Value,
-            FixedSize::Array(_)
-            | FixedSize::Tuple(_)
-            | FixedSize::String(_)
-            | FixedSize::Struct(_) => Location::Memory,
+            Type::Base(_) | Type::Contract(_) => Location::Value,
+            Type::Generic(_) => Location::Unresolved,
+            Type::Array(_) | Type::Tuple(_) | Type::String(_) | Type::Struct(_) => Location::Memory,
+            _ => panic!("Type can not be assigned, returned or passed"),
         }
     }
 }
@@ -373,13 +371,8 @@ impl Location {
 pub struct FunctionBody {
     pub expressions: IndexMap<NodeId, ExpressionAttributes>,
     pub emits: IndexMap<NodeId, EventId>,
-    pub string_literals: IndexSet<SmolStr>, // for yulgen
     // Map lhs of variable declaration to type.
-    pub var_types: IndexMap<NodeId, Type>,
-
-    // This is the id of the VarDecl TypeDesc node
-    // TODO: Do we really need this?
-    pub var_decl_types: IndexMap<NodeId, FixedSize>,
+    pub var_types: IndexMap<NodeId, TypeId>,
     pub calls: IndexMap<NodeId, CallType>,
     pub spans: HashMap<NodeId, Span>,
 }
@@ -387,7 +380,7 @@ pub struct FunctionBody {
 /// Contains contextual information relating to an expression AST node.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExpressionAttributes {
-    pub typ: Type,
+    pub typ: TypeId,
     pub location: Location,
     pub move_location: Option<Location>,
     // Evaluated constant value of const local definition.
@@ -395,7 +388,7 @@ pub struct ExpressionAttributes {
 }
 
 impl ExpressionAttributes {
-    pub fn new(typ: Type, location: Location) -> Self {
+    pub fn new(typ: TypeId, location: Location) -> Self {
         Self {
             typ,
             location,
@@ -411,8 +404,8 @@ impl ExpressionAttributes {
     }
 
     /// Adds a move to value, if it is in storage or memory.
-    pub fn into_loaded(mut self) -> Result<Self, CannotMove> {
-        match self.typ {
+    pub fn into_loaded(mut self, db: &dyn AnalyzerDb) -> Result<Self, CannotMove> {
+        match self.typ.typ(db) {
             Type::Base(_) | Type::Contract(_) => {
                 if self.location != Location::Value {
                     self.move_location = Some(Location::Value);
@@ -426,20 +419,17 @@ impl ExpressionAttributes {
 
     /// The final location of an expression after a possible move.
     pub fn final_location(&self) -> Location {
-        if let Some(location) = self.move_location {
-            return location;
-        }
-        self.location
+        self.move_location.unwrap_or(self.location)
     }
 }
 
-impl fmt::Display for ExpressionAttributes {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
+impl crate::display::DisplayWithDb for ExpressionAttributes {
+    fn format(&self, db: &dyn AnalyzerDb, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
+        write!(f, "{}: {:?}", self.typ.display(db), self.location)?;
         if let Some(move_to) = self.move_location {
-            write!(f, "{}: {:?} => {:?}", self.typ, self.location, move_to)
-        } else {
-            write!(f, "{}: {:?}", self.typ, self.location)
+            write!(f, " => {:?}", move_to)?;
         }
+        Ok(())
     }
 }
 
@@ -450,7 +440,7 @@ pub enum CallType {
     Intrinsic(Intrinsic),
     BuiltinValueMethod {
         method: ValueMethod,
-        typ: Type,
+        typ: TypeId,
     },
 
     // create, create2 (will be methods of the context struct soon)
@@ -461,20 +451,30 @@ pub enum CallType {
 
     // MyStruct.foo() (soon MyStruct::foo())
     AssociatedFunction {
-        class: Class,
+        typ: TypeId,
         function: FunctionId,
     },
+    // some_struct_or_contract.foo()
     ValueMethod {
-        is_self: bool,
-        class: Class,
+        typ: TypeId,
         method: FunctionId,
+    },
+    // some_trait.foo()
+    // The reason this can not use `ValueMethod` is mainly because the trait might not have a function implementation
+    // and even if it had it might not be the one that ends up getting executed. An `impl` block will decide that.
+    TraitValueMethod {
+        trait_id: TraitId,
+        method: FunctionSigId,
+        // Traits can not directly be used as types but can act as bounds for generics. This is the generic type
+        // that the method is called on.
+        generic_type: Generic,
     },
     External {
         contract: ContractId,
         function: FunctionId,
     },
     Pure(FunctionId),
-    TypeConstructor(Type),
+    TypeConstructor(TypeId),
 }
 
 impl CallType {
@@ -485,6 +485,7 @@ impl CallType {
             | BuiltinValueMethod { .. }
             | TypeConstructor(_)
             | Intrinsic(_)
+            | TraitValueMethod { .. }
             | BuiltinAssociatedFunction { .. } => None,
             AssociatedFunction { function: id, .. }
             | ValueMethod { method: id, .. }
@@ -503,18 +504,23 @@ impl CallType {
             | CallType::ValueMethod { method: id, .. }
             | CallType::External { function: id, .. }
             | CallType::Pure(id) => id.name(db),
-            CallType::TypeConstructor(typ) => typ.name(),
+            CallType::TraitValueMethod { method: id, .. } => id.name(db),
+            CallType::TypeConstructor(typ) => typ.display(db).to_string().into(),
         }
     }
 
     pub fn is_unsafe(&self, db: &dyn AnalyzerDb) -> bool {
         if let CallType::Intrinsic(_) = self {
             true
-        } else if let CallType::TypeConstructor(Type::Struct(struct_)) = self {
+        } else if let CallType::TypeConstructor(type_id) = self {
             // check that this is the `Context` struct defined in `std`
             // this should be deleted once associated functions are supported and we can
             // define unsafe constructors in Fe
-            struct_.name == "Context" && struct_.id.module(db).ingot(db).name(db) == "std"
+            if let Type::Struct(struct_) = type_id.typ(db) {
+                struct_.name(db) == "Context" && struct_.module(db).ingot(db).name(db) == "std"
+            } else {
+                false
+            }
         } else {
             self.function().map(|id| id.is_unsafe(db)).unwrap_or(false)
         }

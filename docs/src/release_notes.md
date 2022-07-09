@@ -10,6 +10,359 @@ Fe is moving fast. Read up on all the latest improvements.
 **WARNING: All Fe releases are alpha releases and only meant to share the development progress with developers and enthusiasts. It is NOT yet ready for production usage.**
 
 [//]: # (towncrier release notes start)
+## 0.19.1-alpha "Sunstone" (2022-07-06)
+
+
+### Features
+
+
+- Support returning nested struct.
+
+  Example:
+  ```
+  pub struct InnerStruct {
+      pub inner_s: String<10>
+      pub inner_x: i256
+  }
+
+  pub struct NestedStruct {
+      pub inner: InnerStruct
+      pub outer_x: i256
+  }
+
+  contract Foo {
+      pub fn return_nested_struct() -> NestedStruct {
+          ...
+      }
+  }
+  ```
+  ([#635](https://github.com/ethereum/fe/issues/635))
+- Made some small changes to how the `Context` object is used.
+
+  - `ctx` is not required when casting an address to a contract type. Eg `let foo: Foo = Foo(address(0))`
+  - `ctx` is required when calling an external contract function that requires ctx
+
+  Example:
+
+  ```fe
+  use std::context::Context # see issue #679
+
+  contract Foo {
+    pub fn emit_stuff(ctx: Context) {
+      emit Stuff(ctx)  # will be `ctx.emit(Stuff{})` someday
+    }
+  }
+  contract Bar {
+    pub fn call_foo_emit_stuff(ctx: Context) {
+      Foo(address(0)).emit_stuff(ctx)
+    }
+  }
+  event Stuff {}
+  ```
+  ([#703](https://github.com/ethereum/fe/issues/703))
+- Braces! Fe has abandoned python-style significant whitespace in favor of the
+  trusty curly brace.
+
+  In addition, `elif` is now spelled `else if`, and the `pass`
+  statement no longer exists.
+
+  Example:
+  ```fe
+  pub struct SomeError {}
+
+  contract Foo {
+    x: u8
+    y: u16
+
+    pub fn f(a: u8) -> u8 {
+      if a > 10 {
+        let x: u8 = 5
+        return a + x
+      } else if a == 0 {
+        revert SomeError()
+      } else {
+        return a * 10
+      }
+    }
+
+    pub fn noop() {}
+  }
+  ```
+  ([#707](https://github.com/ethereum/fe/issues/707))
+- traits and generic function parameter
+
+  Traits can now be defined, e.g:
+
+  ```
+  trait Computable {
+    fn compute(self, val: u256) -> u256;
+  }
+  ```
+
+  The mechanism to implement a trait is via an `impl` block e.g:
+
+  ```
+  struct Linux {
+    pub counter: u256
+    pub fn get_counter(self) -> u256 {
+      return self.counter
+    }
+    pub fn something_static() -> u256 {
+      return 5
+    }
+  }
+
+  impl Computable for Linux {
+    fn compute(self, val: u256) -> u256 {
+      return val + Linux::something_static() + self.get_counter()
+    }
+  }
+  ```
+
+  Traits can only appear as bounds for generic functions e.g.:
+
+  ```
+  struct Runner {
+
+    pub fn run<T: Computable>(self, _ val: T) -> u256 {
+      return val.compute(val: 1000)
+    }
+  }
+  ```
+
+  Only `struct` functions (not `contract` functions) can have generic parameters.
+  The `run` method of `Runner` can be called with any type that implements `Computable` e.g.
+
+  ```
+  contract Example {
+
+    pub fn generic_compute(self) {
+      let runner: Runner = Runner();
+      assert runner.run(Mac()) == 1001
+      assert runner.run(Linux(counter: 10)) == 1015
+    }
+  }
+  ```
+  ([#710](https://github.com/ethereum/fe/issues/710))
+- Generate artifacts for all contracts of an ingot, not just for contracts that are defined in `main.fe` ([#726](https://github.com/ethereum/fe/issues/726))
+- Allow using complex type as array element type.
+
+  Example:
+  ```
+  contract Foo {
+      pub fn bar() -> i256 {
+          let my_array: Array<Pair, 3> = [Pair::new(1, 0), Pair::new(2, 0), Pair::new(3, 0)]
+
+          let sum: i256 = 0
+          for pair in my_array {
+              sum += pair.x
+          }
+
+          return sum
+      }
+  }
+
+  struct Pair {
+      pub x: i256
+      pub y: i256
+    
+      pub fn new(_ x: i256, _ y: i256) -> Pair {
+          return Pair(x, y)
+      }
+  }
+  ```
+  ([#730](https://github.com/ethereum/fe/issues/730))
+- The `fe` CLI now has subcommands:
+
+  `fe new myproject` - creates a new project structure
+  `fe check .`       - analyzes fe source code and prints errors
+  `fe build .`       - builds a fe project ([#732](https://github.com/ethereum/fe/issues/732))
+- Support passing nested struct types to public functions.
+
+  Example:
+  ```
+  pub struct InnerStruct {
+      pub inner_s: String<10>
+      pub inner_x: i256
+  }
+
+  pub struct NestedStruct {
+      pub inner: InnerStruct
+      pub outer_x: i256
+  }
+
+  contract Foo {
+      pub fn f(arg: NestedStruct) {
+          ...
+      }
+  }
+  ```
+  ([#733](https://github.com/ethereum/fe/issues/733))
+- Added support for repeat expressions (`[VALUE; LENGTH]`).
+
+  e.g.
+
+  ```
+  let my_array: Array<bool, 42> = [bool; 42] 
+  ```
+
+  Also added checks to ensure array and struct types are initialized. These checks are currently performed at the declaration site, but will be loosened in the future. ([#747](https://github.com/ethereum/fe/issues/747))
+
+
+### Bugfixes
+
+- Fix a bug that incorrect instruction is selected when the operands of a comp instruction are a signed type. ([#734](https://github.com/ethereum/fe/issues/734))
+- Fix issue where a negative constant leads to an ICE
+
+  E.g. the following code would previously crash the compiler but shouldn't:
+
+  ```
+  const INIT_VAL: i8 = -1
+  contract Foo {
+    pub fn init_bar() {
+      let x: i8 = INIT_VAL
+    }
+  }
+  ```
+  ([#745](https://github.com/ethereum/fe/issues/745))
+- Fix a bug that causes ICE when nested if-statement has multiple exit point.
+
+  E.g. the following code would previously crash the compiler but shouldn't:
+  ```fe
+   pub fn foo(self) {
+      if true {
+          if self.something { 
+              return 
+          }
+      }
+      if true {
+          if self.something { 
+              return 
+          }
+      }
+  }
+  ```
+  ([#749](https://github.com/ethereum/fe/issues/749))
+
+
+## 0.18.0-alpha "Ruby" (2022-05-27)
+
+### Features
+
+
+- Added support for parsing of attribute calls with generic arguments (e.g. `foo.bar<Baz>()`). ([#719](https://github.com/ethereum/fe/issues/719))
+
+
+### Bugfixes
+
+- Fix a regression where the `stateMutability` field would not be included in the generated ABI ([#722](https://github.com/ethereum/fe/issues/722))
+- Fix two regressions introduced in `0.17.0`
+  * Properly lower right shift operation to yul's `sar` if operand is signed type
+  * Properly lower negate operation to call `safe_sub` ([#723](https://github.com/ethereum/fe/issues/723))
+
+
+## 0.17.0-alpha "Quartz" (2022-05-26)
+
+### Features
+
+
+- Support for underscores in numbers to improve readability e.g. `100_000`.
+
+  Example 
+
+  ```
+      let num: u256 = 1000_000_000_000
+  ```
+  ([#149](https://github.com/ethereum/fe/issues/149))
+- Optimized access of struct fields in storage ([#249](https://github.com/ethereum/fe/issues/249))
+- Unit type `()` is now ABI encodable ([#442](https://github.com/ethereum/fe/issues/442))
+- Temporary default `stateMutability` to `payable` in ABI
+
+  The ABI metadata that the compiler previously generated did not include the `stateMutability` field. This piece of information is important for tooling such as hardhat because it determines whether a function needs to be called with or without sending a transaction.
+
+  As soon as we have support for `mut self` and `mut ctx` we will be able to derive that information from the function signature. In the meantime we now default to `payable`. ([#705](https://github.com/ethereum/fe/issues/705))
+
+
+### Bugfixes
+
+
+- Fixed a crash caused by certain memory to memory assignments.
+
+  E.g. the following code would previously lead to a compiler crash:
+
+  ```
+  my_struct.x = my_struct.y
+  ```
+  ([#590](https://github.com/ethereum/fe/issues/590))
+- Reject unary minus operation if the target type is an unsigned integer number.
+
+  Code below should be reject by `fe` compiler: 
+
+  ```python 
+  contract Foo:
+      pub fn bar(self) -> u32:
+          let unsigned: u32 = 1
+          return -unsigned
+    
+      pub fn foo():
+          let a: i32 = 1
+          let b: u32 = -a
+  ```
+  ([#651](https://github.com/ethereum/fe/issues/651))
+- Fixed crash when passing a struct that contains an array
+
+  E.g. the following would previously result in a compiler crash:
+
+  ```
+  struct MyArray:
+      pub x: Array<i32, 2>
+    
+    
+  contract Foo:
+      pub fn bar(my_arr: MyArray):
+          pass
+  ```
+  ([#681](https://github.com/ethereum/fe/issues/681))
+- reject infinite size struct definitions.
+
+  Fe `structs` having infinite size due to recursive definitions were not rejected earlier and would cause ICE in the analyzer since they were not properly handled. Now `structs` having infinite size are properly identified by detecting cycles in the dependency graph of the struct field definitions and an error is thrown by the analyzer. ([#682](https://github.com/ethereum/fe/issues/682))
+- Return instead of revert when contract is called without data.
+
+  If a contract is called without data so that no function is invoked,
+  we would previously `revert` but that would leave us without a 
+  way to send ETH to a contract so instead it will cause a `return` now. ([#694](https://github.com/ethereum/fe/issues/694))
+- Resolve compiler crash when using certain reserved YUL words as struct field names.
+
+  E.g. the following would previously lead to a compiler crash because `numer` is
+  a reserved keyword in YUL.
+
+  ```
+  struct Foo:
+    pub number: u256
+
+  contract Meh:
+
+    pub fn yay() -> Foo:
+      return Foo(number:2)
+  ```
+  ([#709](https://github.com/ethereum/fe/issues/709))
+
+
+## 0.16.0-alpha (2022-05-05)
+
+### Features
+
+
+- Change static function call syntax from `Bar.foo()` to `Bar::foo()` ([#241](https://github.com/ethereum/fe/issues/241))
+- Added support for retrieving the base fee via `ctx.base_fee()` ([#503](https://github.com/ethereum/fe/issues/503))
+
+
+### Bugfixes
+
+
+- Resolve functions on structs via path (e.g. `bi::ba::bums()`) ([#241](https://github.com/ethereum/fe/issues/241))
+
+
 ## 0.15.0-alpha (2022-04-04)
 
 

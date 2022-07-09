@@ -6,39 +6,10 @@ expression: "build_snapshot(&db, module)"
 note: 
   ┌─ balances.fe:5:5
   │  
-5 │ ╭     pub fn my_balance(self, ctx: Context) -> u256:
+5 │ ╭     pub fn my_balance(self, ctx: Context) -> u256 {
 6 │ │         return ctx.self_balance()
-  │ ╰─────────────────────────────────^ attributes hash: 3247318976601732237
-  │  
-  = FunctionSignature {
-        self_decl: Some(
-            Mutable,
-        ),
-        ctx_decl: Some(
-            Mutable,
-        ),
-        params: [
-            FunctionParam {
-                label: None,
-                name: "ctx",
-                typ: Ok(
-                    Struct(
-                        Struct {
-                            name: "Context",
-                            field_count: 0,
-                        },
-                    ),
-                ),
-            },
-        ],
-        return_type: Ok(
-            Base(
-                Numeric(
-                    U256,
-                ),
-            ),
-        ),
-    }
+7 │ │     }
+  │ ╰─────^ self: Some(Mutable), params: [{ label: None, name: ctx, typ: Context }] -> u256
 
 note: 
   ┌─ balances.fe:6:16
@@ -53,63 +24,25 @@ note:
   │                ^^^^^^^^^^^^^^^^^^ u256: Value
 
 note: 
-  ┌─ balances.fe:8:5
-  │  
-8 │ ╭     pub fn other_balance(self, ctx: Context, someone: address) -> u256:
-9 │ │         return ctx.balance_of(someone)
-  │ ╰──────────────────────────────────────^ attributes hash: 7590750053308816492
-  │  
-  = FunctionSignature {
-        self_decl: Some(
-            Mutable,
-        ),
-        ctx_decl: Some(
-            Mutable,
-        ),
-        params: [
-            FunctionParam {
-                label: None,
-                name: "ctx",
-                typ: Ok(
-                    Struct(
-                        Struct {
-                            name: "Context",
-                            field_count: 0,
-                        },
-                    ),
-                ),
-            },
-            FunctionParam {
-                label: None,
-                name: "someone",
-                typ: Ok(
-                    Base(
-                        Address,
-                    ),
-                ),
-            },
-        ],
-        return_type: Ok(
-            Base(
-                Numeric(
-                    U256,
-                ),
-            ),
-        ),
-    }
+   ┌─ balances.fe:9:5
+   │  
+ 9 │ ╭     pub fn other_balance(self, ctx: Context, someone: address) -> u256 {
+10 │ │         return ctx.balance_of(someone)
+11 │ │     }
+   │ ╰─────^ self: Some(Mutable), params: [{ label: None, name: ctx, typ: Context }, { label: None, name: someone, typ: address }] -> u256
 
 note: 
-  ┌─ balances.fe:9:16
-  │
-9 │         return ctx.balance_of(someone)
-  │                ^^^            ^^^^^^^ address: Value
-  │                │               
-  │                Context: Memory
+   ┌─ balances.fe:10:16
+   │
+10 │         return ctx.balance_of(someone)
+   │                ^^^            ^^^^^^^ address: Value
+   │                │               
+   │                Context: Memory
 
 note: 
-  ┌─ balances.fe:9:16
-  │
-9 │         return ctx.balance_of(someone)
-  │                ^^^^^^^^^^^^^^^^^^^^^^^ u256: Value
+   ┌─ balances.fe:10:16
+   │
+10 │         return ctx.balance_of(someone)
+   │                ^^^^^^^^^^^^^^^^^^^^^^^ u256: Value
 
 

@@ -1,15 +1,19 @@
 use crate::context::{AnalyzerContext, CallType, FunctionBody};
 use crate::db::{Analysis, AnalyzerDb};
+use crate::display::Displayable;
 use crate::errors::TypeError;
-use crate::namespace::items::{DepGraph, DepGraphWrapper, DepLocality, FunctionId, Item, TypeDef};
+use crate::namespace::items::{
+    DepGraph, DepGraphWrapper, DepLocality, FunctionId, FunctionSigId, Item, TypeDef,
+};
 use crate::namespace::scopes::{BlockScope, BlockScopeType, FunctionScope, ItemScope};
-use crate::namespace::types::{self, Contract, CtxDecl, FixedSize, SelfDecl, Struct, Type};
+use crate::namespace::types::{self, CtxDecl, Generic, SelfDecl, Type, TypeId};
 use crate::traversal::functions::traverse_statements;
-use crate::traversal::types::type_desc;
+use crate::traversal::types::{type_desc, type_desc_to_trait};
 use fe_common::diagnostics::Label;
-use fe_parser::ast;
+use fe_parser::ast::{self, GenericParameter};
 use fe_parser::node::Node;
 use if_chain::if_chain;
+use smol_str::SmolStr;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -17,30 +21,77 @@ use std::rc::Rc;
 /// errors. Does not inspect the function body.
 pub fn function_signature(
     db: &dyn AnalyzerDb,
-    function: FunctionId,
+    function: FunctionSigId,
 ) -> Analysis<Rc<types::FunctionSignature>> {
-    let node = &function.data(db).ast;
-    let def = &node.kind;
+    let def = &function.data(db).ast;
 
     let mut scope = ItemScope::new(db, function.module(db));
-    let fn_parent = function.class(db);
+    let fn_parent = function.parent(db);
 
     let mut self_decl = None;
     let mut ctx_decl = None;
     let mut names = HashMap::new();
     let mut labels = HashMap::new();
 
+    function.data(db).ast.kind.generic_params.kind.iter().fold(
+        HashMap::<SmolStr, Node<_>>::new(),
+        |mut accum, param| {
+            if let Some(previous) = accum.get(&param.name()) {
+                scope.duplicate_name_error(
+                    "duplicate generic parameter",
+                    &param.name(),
+                    previous.span,
+                    param.name_node().span,
+                );
+            } else {
+                accum.insert(param.name(), param.name_node());
+            };
+
+            accum
+        },
+    );
+
+    if !matches!(fn_parent, Item::Type(TypeDef::Struct(_))) && function.is_generic(db) {
+        scope.fancy_error(
+            "generic function parameters aren't yet supported outside of struct functions",
+            vec![Label::primary(
+                function.data(db).ast.kind.generic_params.span,
+                "This can not appear here",
+            )],
+            vec!["Hint: Struct functions can have generic parameters".into()],
+        );
+    }
+
+    if function.is_generic(db) {
+        for param in function.data(db).ast.kind.generic_params.kind.iter() {
+            if let GenericParameter::Unbounded(val) = param {
+                scope.fancy_error(
+                    "unbounded generic parameters aren't yet supported",
+                    vec![Label::primary(
+                        val.span,
+                        format!("`{}` needs to be bound by some trait", val.kind),
+                    )],
+                    vec![format!(
+                        "Hint: Change `{}` to `{}: SomeTrait`",
+                        val.kind, val.kind
+                    )],
+                );
+            }
+        }
+    }
+
     let params = def
+        .kind
         .args
         .iter()
         .enumerate()
         .filter_map(|(index, arg)| match &arg.kind {
             ast::FunctionArg::Self_ => {
-                if fn_parent.is_none() {
+                if matches!(fn_parent, Item::Module(_)) {
                     scope.error(
-                        "`self` can only be used in contract or struct functions",
+                        "`self` can only be used in contract, struct, trait or impl functions",
                         arg.span,
-                        "not allowed in functions defined outside of a contract or struct",
+                        "not allowed in functions defined directly in a module",
                     );
                 } else {
                     self_decl = Some(SelfDecl::Mutable);
@@ -55,17 +106,17 @@ pub fn function_signature(
                 None
             }
             ast::FunctionArg::Regular(reg) => {
-                let typ = type_desc(&mut scope, &reg.typ).and_then(|typ| match typ.try_into() {
-                    Ok(typ) => Ok(typ),
-                    Err(_) => Err(TypeError::new(scope.error(
+                let typ = resolve_function_param_type(db, function, &mut scope, &reg.typ).and_then(|typ| match typ {
+                    typ if typ.has_fixed_size(db) => Ok(typ),
+                    _ => Err(TypeError::new(scope.error(
                         "function parameter types must have fixed size",
                         reg.typ.span,
-                        "`Map` type can't be used as a function parameter",
+                        &format!("`{}` type can't be used as a function parameter", typ.display(db)),
                     ))),
                 });
 
                 if let Some(context_type) = scope.get_context_type() {
-                    if typ == Ok(FixedSize::Struct(context_type)) {
+                    if typ == Ok(context_type) {
                         if arg.name() != "ctx" {
                             scope.error(
                                 "invalid `Context` instance name",
@@ -101,9 +152,9 @@ pub fn function_signature(
                         if label.kind != "_";
                         if let Some(dup_idx) = labels.get(&label.kind);
                         then {
-                            let dup_arg: &Node<ast::FunctionArg> = &def.args[*dup_idx];
+                            let dup_arg: &Node<ast::FunctionArg> = &def.kind.args[*dup_idx];
                             scope.fancy_error(
-                                &format!("duplicate parameter labels in function `{}`", def.name.kind),
+                                &format!("duplicate parameter labels in function `{}`", def.kind.name.kind),
                                 vec![
                                     Label::primary(dup_arg.span, "the label `{}` was first used here"),
                                     Label::primary(label.span, "label `{}` used again here"),
@@ -125,9 +176,9 @@ pub fn function_signature(
                     );
                     None
                 } else if let Some(dup_idx) = names.get(&reg.name.kind) {
-                    let dup_arg: &Node<ast::FunctionArg> = &def.args[*dup_idx];
+                    let dup_arg: &Node<ast::FunctionArg> = &def.kind.args[*dup_idx];
                     scope.duplicate_name_error(
-                        &format!("duplicate parameter names in function `{}`", def.name.kind),
+                        &format!("duplicate parameter names in function `{}`", function.name(db)),
                         &reg.name.kind,
                         dup_arg.span,
                         arg.span,
@@ -146,10 +197,11 @@ pub fn function_signature(
         .collect();
 
     let return_type = def
+        .kind
         .return_type
         .as_ref()
         .map(|type_node| {
-            let fn_name = &def.name.kind;
+            let fn_name = &function.name(db);
             if fn_name == "__init__" || fn_name == "__call__" {
                 // `__init__` and `__call__` must not return any type other than `()`.
                 if type_node.kind != ast::TypeDesc::Unit {
@@ -162,15 +214,11 @@ pub fn function_signature(
                         ],
                     );
                 }
-                Ok(FixedSize::unit())
+                Ok(TypeId::unit(scope.db()))
             } else {
-                match type_desc(&mut scope, type_node)?.try_into() {
-                    Ok(FixedSize::Struct(val)) if val.id.has_complex_fields(db) && function.is_public(db) => {
-                        scope.not_yet_implemented("structs with complex fields can't be returned from public functions yet", type_node.span);
-                        Ok(FixedSize::Struct(val))
-                    }
-                    Ok(typ) => Ok(typ),
-                    Err(_) => Err(TypeError::new(scope.error(
+                match type_desc(&mut scope, type_node)? {
+                    typ if typ.has_fixed_size(scope.db()) => Ok(typ),
+                    _ => Err(TypeError::new(scope.error(
                         "function return type must have a fixed size",
                         type_node.span,
                         "this can't be returned from a function",
@@ -178,7 +226,7 @@ pub fn function_signature(
                 }
             }
         })
-        .unwrap_or_else(|| Ok(FixedSize::unit()));
+        .unwrap_or_else(|| Ok(TypeId::unit(db)));
 
     Analysis {
         value: Rc::new(types::FunctionSignature {
@@ -191,6 +239,32 @@ pub fn function_signature(
     }
 }
 
+pub fn resolve_function_param_type(
+    db: &dyn AnalyzerDb,
+    function: FunctionSigId,
+    context: &mut dyn AnalyzerContext,
+    desc: &Node<ast::TypeDesc>,
+) -> Result<TypeId, TypeError> {
+    // First check if the param type is a local generic of the function. This won't hold when in the future
+    // generics can appear on the contract, struct or module level but it could be good enough for now.
+    if let ast::TypeDesc::Base { base } = &desc.kind {
+        if let Some(val) = function.generic_param(db, base) {
+            let bounds = match val {
+                ast::GenericParameter::Unbounded(_) => vec![].into(),
+                ast::GenericParameter::Bounded { bound, .. } => {
+                    vec![type_desc_to_trait(context, &bound)?].into()
+                }
+            };
+
+            return Ok(db.intern_type(Type::Generic(Generic {
+                name: base.clone(),
+                bounds,
+            })));
+        }
+    }
+    type_desc(context, desc)
+}
+
 /// Gather context information for a function body and check for type errors.
 pub fn function_body(db: &dyn AnalyzerDb, function: FunctionId) -> Analysis<Rc<FunctionBody>> {
     let def = &function.data(db).ast.kind;
@@ -201,17 +275,17 @@ pub fn function_body(db: &dyn AnalyzerDb, function: FunctionId) -> Analysis<Rc<F
     // If the return type is anything else, we need to ensure that all code paths
     // return or revert.
     if let Ok(return_type) = &function.signature(db).return_type {
-        if !return_type.is_unit() && !all_paths_return_or_revert(&def.body) {
+        if !return_type.typ(db).is_unit() && !all_paths_return_or_revert(&def.body) {
             scope.fancy_error(
                 "function body is missing a return or revert statement",
                 vec![
                     Label::primary(
-                        def.name.span,
+                        function.name_span(db),
                         "all paths of this function must `return` or `revert`",
                     ),
                     Label::secondary(
-                        def.return_type.as_ref().unwrap().span,
-                        format!("expected function to return `{}`", return_type),
+                        def.sig.kind.return_type.as_ref().unwrap().span,
+                        format!("expected function to return `{}`", return_type.display(db)),
                     ),
                 ],
                 vec![],
@@ -278,8 +352,8 @@ pub fn function_dependency_graph(db: &dyn AnalyzerDb, function: FunctionId) -> D
             .clone()
             .into_iter()
             .chain(sig.params.iter().filter_map(|param| param.typ.clone().ok()))
-            .filter_map(|typ| match typ {
-                FixedSize::Contract(Contract { id, .. }) => {
+            .filter_map(|id| match id.typ(db) {
+                Type::Contract(id) => {
                     // Contract types that are taken as (non-self) args or returned are "external",
                     // meaning that they're addresses of other contracts, so we don't have direct
                     // access to their fields, etc.
@@ -289,7 +363,7 @@ pub fn function_dependency_graph(db: &dyn AnalyzerDb, function: FunctionId) -> D
                         DepLocality::External,
                     ))
                 }
-                FixedSize::Struct(Struct { id, .. }) => {
+                Type::Struct(id) => {
                     Some((root, Item::Type(TypeDef::Struct(id)), DepLocality::Local))
                 }
                 _ => None,
@@ -297,8 +371,8 @@ pub fn function_dependency_graph(db: &dyn AnalyzerDb, function: FunctionId) -> D
     );
     // A function that takes `self` depends on the type of `self`, so that any
     // relevant struct getters/setters are included when compiling.
-    if let Some(class) = function.class(db) {
-        directs.push((root, class.as_item(), DepLocality::Local));
+    if !function.sig(db).is_module_fn(db) {
+        directs.push((root, function.parent(db), DepLocality::Local));
     }
 
     let body = function.body(db);
@@ -307,12 +381,11 @@ pub fn function_dependency_graph(db: &dyn AnalyzerDb, function: FunctionId) -> D
             CallType::Pure(function) | CallType::AssociatedFunction { function, .. } => {
                 directs.push((root, Item::Function(*function), DepLocality::Local));
             }
-            CallType::ValueMethod { class, method, .. } => {
-                // Including the "class" type here is probably redundant; the type will
-                // also be part of the fn sig, or some type decl, or some create/create2 call,
-                // or...
-                directs.push((root, class.as_item(), DepLocality::Local));
+            CallType::ValueMethod { method, .. } => {
                 directs.push((root, Item::Function(*method), DepLocality::Local));
+            }
+            CallType::TraitValueMethod { trait_id, .. } => {
+                directs.push((root, Item::Trait(*trait_id), DepLocality::Local));
             }
             CallType::External { contract, function } => {
                 directs.push((root, Item::Function(*function), DepLocality::External));
@@ -323,17 +396,17 @@ pub fn function_dependency_graph(db: &dyn AnalyzerDb, function: FunctionId) -> D
                     DepLocality::External,
                 ));
             }
-            CallType::TypeConstructor(Type::Struct(Struct { id, .. })) => {
-                directs.push((root, Item::Type(TypeDef::Struct(*id)), DepLocality::Local));
-            }
-            CallType::TypeConstructor(Type::Contract(Contract { id, .. })) => {
-                directs.push((
+            CallType::TypeConstructor(type_id) => match type_id.typ(db) {
+                Type::Struct(id) => {
+                    directs.push((root, Item::Type(TypeDef::Struct(id)), DepLocality::Local))
+                }
+                Type::Contract(id) => directs.push((
                     root,
-                    Item::Type(TypeDef::Contract(*id)),
+                    Item::Type(TypeDef::Contract(id)),
                     DepLocality::External,
-                ));
-            }
-            CallType::TypeConstructor(_) => {}
+                )),
+                _ => {}
+            },
             CallType::BuiltinAssociatedFunction { contract, .. } => {
                 // create/create2 call. The contract type is "external" for dependency graph
                 // purposes.
@@ -355,17 +428,21 @@ pub fn function_dependency_graph(db: &dyn AnalyzerDb, function: FunctionId) -> D
             .values()
             .map(|event| (root, Item::Event(*event), DepLocality::Local)),
     );
-    directs.extend(body.var_decl_types.values().filter_map(|typ| match typ {
-        FixedSize::Contract(Contract { id, .. }) => Some((
-            root,
-            Item::Type(TypeDef::Contract(*id)),
-            DepLocality::External,
-        )),
-        FixedSize::Struct(Struct { id, .. }) => {
-            Some((root, Item::Type(TypeDef::Struct(*id)), DepLocality::Local))
-        }
-        _ => None,
-    }));
+    directs.extend(
+        body.var_types
+            .values()
+            .filter_map(|typid| match typid.typ(db) {
+                Type::Contract(id) => Some((
+                    root,
+                    Item::Type(TypeDef::Contract(id)),
+                    DepLocality::External,
+                )),
+                Type::Struct(id) => {
+                    Some((root, Item::Type(TypeDef::Struct(id)), DepLocality::Local))
+                }
+                _ => None,
+            }),
+    );
 
     let mut graph = DepGraph::from_edges(directs.iter());
     for (_, item, _) in directs {

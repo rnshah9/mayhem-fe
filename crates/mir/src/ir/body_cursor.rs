@@ -2,7 +2,9 @@
 //! in-place.
 // The design used here is greatly inspired by [`cranelift`](https://crates.io/crates/cranelift)
 
-use super::{BasicBlock, BasicBlockId, FunctionBody, Inst, InstId, Value, ValueId};
+use super::{
+    value::AssignableValue, BasicBlock, BasicBlockId, FunctionBody, Inst, InstId, ValueId,
+};
 
 /// Specify a current location of [`BodyCursor`]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,6 +23,14 @@ pub struct BodyCursor<'a> {
 impl<'a> BodyCursor<'a> {
     pub fn new(body: &'a mut FunctionBody, loc: CursorLocation) -> Self {
         Self { body, loc }
+    }
+
+    pub fn new_at_entry(body: &'a mut FunctionBody) -> Self {
+        let entry = body.order.entry();
+        Self {
+            body,
+            loc: CursorLocation::BlockTop(entry),
+        }
     }
     pub fn set_loc(&mut self, loc: CursorLocation) {
         self.loc = loc;
@@ -102,7 +112,7 @@ impl<'a> BodyCursor<'a> {
 
     /// Sets a cursor to an entry block.
     pub fn set_to_entry(&mut self) {
-        let entry_bb = self.body().order.entry_block();
+        let entry_bb = self.body().order.entry();
         let loc = CursorLocation::BlockTop(entry_bb);
         self.set_loc(loc);
     }
@@ -125,15 +135,6 @@ impl<'a> BodyCursor<'a> {
         let inst = self.body.store.store_inst(data);
         self.insert_inst(inst);
         inst
-    }
-
-    /// Replace a current pointed [`Inst`] with `new_inst` in-place.
-    ///
-    /// # Panics
-    /// Panics if a cursor doesn't point [`CursorLocation::Inst`].
-    pub fn replace(&mut self, new_inst: Inst) {
-        let inst = self.expect_inst();
-        self.body.store.replace_inst(inst, new_inst);
     }
 
     /// Remove a current pointed [`Inst`] from a function body. A cursor
@@ -198,11 +199,11 @@ impl<'a> BodyCursor<'a> {
         block_id
     }
 
-    pub fn store_and_map_result(&mut self, result: Value) -> ValueId {
+    pub fn map_result(&mut self, result: AssignableValue) -> Option<ValueId> {
         let inst = self.expect_inst();
-        let result_id = self.body.store.store_value(result);
-        self.body.store.map_result(inst, result_id);
-        result_id
+        let result_value = result.value_id();
+        self.body.store.map_result(inst, result);
+        result_value
     }
 
     /// Returns current inst that cursor points.

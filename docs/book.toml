@@ -6,9 +6,14 @@ src = "src"
 title = "The Fe Guide"
 
 [output.html]
+additional-js = ["theme/custom-highlight.js"]
 additional-css = ["theme/reference.css"]
 
 [output.linkcheck]
 follow-web-links = true
 warning-policy = "error"
 exclude = [ 'github\.com', 'goerli\.etherscan\.io' ]
+
+[output.html.fold]
+enable = true
+level = 1

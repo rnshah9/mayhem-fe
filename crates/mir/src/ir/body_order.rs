@@ -25,7 +25,7 @@ impl BodyOrder {
     }
 
     /// Returns an entry block of a function body.
-    pub fn entry_block(&self) -> BasicBlockId {
+    pub fn entry(&self) -> BasicBlockId {
         self.entry_block
     }
 
@@ -83,7 +83,6 @@ impl BodyOrder {
     /// # Panics
     /// Panics if
     /// 1. `block` is not inserted yet.
-    /// 2. No terminator found in a block.
     pub fn terminator(&self, store: &BodyDataStore, block: BasicBlockId) -> Option<InstId> {
         let last_inst = self.last_inst(block)?;
         if store.is_terminator(last_inst) {

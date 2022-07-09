@@ -6,7 +6,7 @@ use crate::namespace::items::{
     Item, TypeDef,
 };
 use crate::namespace::scopes::ItemScope;
-use crate::namespace::types::{self, Contract, Struct, Type};
+use crate::namespace::types::{self, Type};
 use crate::traversal::types::type_desc;
 use fe_common::diagnostics::Label;
 use fe_parser::ast;
@@ -23,11 +23,12 @@ pub fn contract_all_functions(db: &dyn AnalyzerDb, contract: ContractId) -> Rc<[
         .filter_map(|stmt| match stmt {
             ast::ContractStmt::Event(_) => None,
             ast::ContractStmt::Function(node) => {
-                Some(db.intern_function(Rc::new(items::Function {
-                    ast: node.clone(),
+                Some(db.intern_function(Rc::new(items::Function::new(
+                    db,
+                    node,
+                    Some(Item::Type(TypeDef::Contract(contract))),
                     module,
-                    parent: Some(items::Class::Contract(contract)),
-                })))
+                ))))
             }
         })
         .collect()
@@ -53,7 +54,7 @@ pub fn contract_function_map(
                 def_name,
                 &NamedThing::Item(Item::Event(event)),
                 Some(event.name_span(db)),
-                def.kind.name.span,
+                def.kind.sig.kind.name.span,
             );
             continue;
         }
@@ -64,7 +65,7 @@ pub fn contract_function_map(
                 def_name,
                 &named_item,
                 named_item.name_span(db),
-                def.kind.name.span,
+                def.kind.sig.kind.name.span,
             );
             continue;
         }
@@ -328,7 +329,7 @@ pub fn contract_field_map(
 pub fn contract_field_type(
     db: &dyn AnalyzerDb,
     field: ContractFieldId,
-) -> Analysis<Result<types::Type, errors::TypeError>> {
+) -> Analysis<Result<types::TypeId, errors::TypeError>> {
     let mut scope = ItemScope::new(db, field.data(db).parent.module(db));
     let typ = type_desc(&mut scope, &field.data(db).ast.kind.typ);
 
@@ -358,10 +359,9 @@ pub fn contract_dependency_graph(db: &dyn AnalyzerDb, contract: ContractId) -> D
     let fields = contract.fields(db);
     let field_types = fields
         .values()
-        .filter_map(|field| match field.typ(db).ok()? {
-            // We don't want
-            Type::Contract(Contract { id, .. }) => Some(Item::Type(TypeDef::Contract(id))),
-            Type::Struct(Struct { id, .. }) => Some(Item::Type(TypeDef::Struct(id))),
+        .filter_map(|field| match field.typ(db).ok()?.typ(db) {
+            Type::Contract(id) => Some(Item::Type(TypeDef::Contract(id))),
+            Type::Struct(id) => Some(Item::Type(TypeDef::Struct(id))),
             // TODO: when tuples can contain non-primitive items,
             // we'll have to depend on tuple element types
             _ => None,

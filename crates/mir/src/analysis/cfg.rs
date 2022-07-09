@@ -6,14 +6,16 @@ use crate::ir::{inst::BranchInfo, BasicBlockId, FunctionBody, InstId};
 pub struct ControlFlowGraph {
     entry: BasicBlockId,
     blocks: FxHashMap<BasicBlockId, BlockNode>,
+    pub(super) exits: Vec<BasicBlockId>,
 }
 
 impl ControlFlowGraph {
     pub fn compute(func: &FunctionBody) -> Self {
-        let entry = func.order.entry_block();
+        let entry = func.order.entry();
         let mut cfg = Self {
             entry,
             blocks: FxHashMap::default(),
+            exits: vec![],
         };
 
         for block in func.order.iter_block() {
@@ -27,6 +29,10 @@ impl ControlFlowGraph {
         cfg
     }
 
+    pub fn entry(&self) -> BasicBlockId {
+        self.entry
+    }
+
     pub fn preds(&self, block: BasicBlockId) -> &[BasicBlockId] {
         self.blocks[&block].preds()
     }
@@ -35,23 +41,37 @@ impl ControlFlowGraph {
         self.blocks[&block].succs()
     }
 
+    pub fn post_order(&self) -> CfgPostOrder {
+        CfgPostOrder::new(self)
+    }
+
+    pub(super) fn add_edge(&mut self, from: BasicBlockId, to: BasicBlockId) {
+        self.node_mut(to).push_pred(from);
+        self.node_mut(from).push_succ(to);
+    }
+
+    pub(super) fn reverse_edge(&mut self, new_entry: BasicBlockId, new_exits: Vec<BasicBlockId>) {
+        for (_, block) in self.blocks.iter_mut() {
+            block.reverse_edge()
+        }
+
+        self.entry = new_entry;
+        self.exits = new_exits;
+    }
+
     fn analyze_terminator(&mut self, func: &FunctionBody, terminator: InstId) {
         let block = func.order.inst_block(terminator);
         match func.store.branch_info(terminator) {
             BranchInfo::NotBranch => {
                 self.node_mut(block);
+                self.exits.push(block)
             }
             BranchInfo::Jump(dest) => self.add_edge(block, dest),
-            BranchInfo::Branch((then, else_)) => {
+            BranchInfo::Branch(_, then, else_) => {
                 self.add_edge(block, then);
                 self.add_edge(block, else_);
             }
         }
-    }
-
-    fn add_edge(&mut self, from: BasicBlockId, to: BasicBlockId) {
-        self.node_mut(to).push_pred(from);
-        self.node_mut(from).push_succ(to);
     }
 
     fn node_mut(&mut self, block: BasicBlockId) -> &mut BlockNode {
@@ -80,5 +100,67 @@ impl BlockNode {
 
     fn succs(&self) -> &[BasicBlockId] {
         &self.succs
+    }
+
+    fn reverse_edge(&mut self) {
+        std::mem::swap(&mut self.preds, &mut self.succs)
+    }
+}
+
+pub struct CfgPostOrder<'a> {
+    cfg: &'a ControlFlowGraph,
+    node_state: FxHashMap<BasicBlockId, NodeState>,
+    stack: Vec<BasicBlockId>,
+}
+
+impl<'a> CfgPostOrder<'a> {
+    fn new(cfg: &'a ControlFlowGraph) -> Self {
+        let stack = vec![cfg.entry()];
+
+        Self {
+            cfg,
+            node_state: FxHashMap::default(),
+            stack,
+        }
+    }
+}
+
+impl<'a> Iterator for CfgPostOrder<'a> {
+    type Item = BasicBlockId;
+
+    fn next(&mut self) -> Option<BasicBlockId> {
+        while let Some(&block) = self.stack.last() {
+            let node_state = self.node_state.entry(block).or_default();
+            if *node_state == NodeState::Unvisited {
+                *node_state = NodeState::Visited;
+                for &succ in self.cfg.succs(block) {
+                    let pred_state = self.node_state.entry(succ).or_default();
+                    if *pred_state == NodeState::Unvisited {
+                        self.stack.push(succ);
+                    }
+                }
+            } else {
+                self.stack.pop().unwrap();
+                if *node_state != NodeState::Finished {
+                    *node_state = NodeState::Finished;
+                    return Some(block);
+                }
+            }
+        }
+
+        None
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NodeState {
+    Unvisited,
+    Visited,
+    Finished,
+}
+
+impl Default for NodeState {
+    fn default() -> Self {
+        Self::Unvisited
     }
 }

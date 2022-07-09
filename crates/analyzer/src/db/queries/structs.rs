@@ -3,11 +3,11 @@ use crate::context::AnalyzerContext;
 use crate::db::Analysis;
 use crate::errors::TypeError;
 use crate::namespace::items::{
-    self, DepGraph, DepGraphWrapper, DepLocality, Function, FunctionId, Item, StructField,
-    StructFieldId, StructId, TypeDef,
+    self, DepGraph, DepGraphWrapper, DepLocality, FunctionId, Item, StructField, StructFieldId,
+    StructId, TypeDef,
 };
 use crate::namespace::scopes::ItemScope;
-use crate::namespace::types::{self, Contract, FixedSize, Struct};
+use crate::namespace::types::{Type, TypeId};
 use crate::traversal::types::type_desc;
 use crate::AnalyzerDb;
 use fe_parser::ast;
@@ -15,14 +15,6 @@ use indexmap::map::{Entry, IndexMap};
 use smol_str::SmolStr;
 use std::rc::Rc;
 use std::str::FromStr;
-
-pub fn struct_type(db: &dyn AnalyzerDb, struct_: StructId) -> Rc<types::Struct> {
-    Rc::new(types::Struct {
-        name: struct_.name(db),
-        id: struct_,
-        field_count: struct_.fields(db).len(),
-    })
-}
 
 pub fn struct_all_fields(db: &dyn AnalyzerDb, struct_: StructId) -> Rc<[StructFieldId]> {
     struct_
@@ -72,7 +64,7 @@ pub fn struct_field_map(
 pub fn struct_field_type(
     db: &dyn AnalyzerDb,
     field: StructFieldId,
-) -> Analysis<Result<types::FixedSize, TypeError>> {
+) -> Analysis<Result<TypeId, TypeError>> {
     let field_data = field.data(db);
 
     let mut scope = ItemScope::new(db, field_data.parent.module(db));
@@ -92,16 +84,16 @@ pub fn struct_field_type(
         scope.not_yet_implemented("struct field initial value assignment", field_data.ast.span);
     }
     let typ = match type_desc(&mut scope, typ) {
-        Ok(typ) => match typ.try_into() {
-            Ok(FixedSize::Contract(contract)) => {
+        Ok(typ) => match typ.typ(db) {
+            Type::Contract(_) => {
                 scope.not_yet_implemented(
                     "contract types aren't yet supported as struct fields",
                     field_data.ast.span,
                 );
-                Ok(FixedSize::Contract(contract))
+                Ok(typ)
             }
-            Ok(typ) => Ok(typ),
-            Err(_) => Err(TypeError::new(scope.error(
+            t if t.has_fixed_size() => Ok(typ),
+            _ => Err(TypeError::new(scope.error(
                 "struct field type must have a fixed size",
                 field_data.ast.span,
                 "this can't be used as an struct field",
@@ -121,11 +113,12 @@ pub fn struct_all_functions(db: &dyn AnalyzerDb, struct_: StructId) -> Rc<[Funct
         .functions
         .iter()
         .map(|node| {
-            db.intern_function(Rc::new(Function {
-                ast: node.clone(),
-                module: struct_data.module,
-                parent: Some(items::Class::Struct(struct_)),
-            }))
+            db.intern_function(Rc::new(items::Function::new(
+                db,
+                node,
+                Some(Item::Type(TypeDef::Struct(struct_))),
+                struct_data.module,
+            )))
         })
         .collect()
 }
@@ -150,7 +143,7 @@ pub fn struct_function_map(
                 def_name,
                 &named_item,
                 named_item.name_span(db),
-                def.kind.name.span,
+                func.name_span(db),
             );
             continue;
         }
@@ -161,7 +154,7 @@ pub fn struct_function_map(
                     "function name `{}` conflicts with built-in function",
                     def_name
                 ),
-                def.kind.name.span,
+                func.name_span(db),
                 &format!("`{}` is a built-in function", def_name),
             );
             continue;
@@ -184,26 +177,28 @@ pub fn struct_function_map(
     Analysis::new(Rc::new(map), scope.diagnostics.take().into())
 }
 
-pub fn struct_dependency_graph(db: &dyn AnalyzerDb, struct_: StructId) -> DepGraphWrapper {
+pub fn struct_dependency_graph(
+    db: &dyn AnalyzerDb,
+    struct_: StructId,
+) -> Analysis<DepGraphWrapper> {
     // A struct depends on the types of its fields and on everything they depend on.
     // It *does not* depend on its public functions; those will only be part of
     // the broader dependency graph if they're in the call graph of some public
     // contract function.
 
+    let scope = ItemScope::new(db, struct_.module(db));
     let root = Item::Type(TypeDef::Struct(struct_));
     let fields = struct_
         .fields(db)
         .values()
-        .filter_map(|field| match field.typ(db).ok()? {
-            FixedSize::Contract(Contract { id, .. }) => Some((
+        .filter_map(|field| match field.typ(db).ok()?.typ(db) {
+            Type::Contract(id) => Some((
                 root,
                 Item::Type(TypeDef::Contract(id)),
                 DepLocality::External,
             )),
             // Not possible yet, but it will be soon
-            FixedSize::Struct(Struct { id, .. }) => {
-                Some((root, Item::Type(TypeDef::Struct(id)), DepLocality::Local))
-            }
+            Type::Struct(id) => Some((root, Item::Type(TypeDef::Struct(id)), DepLocality::Local)),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -214,5 +209,31 @@ pub fn struct_dependency_graph(db: &dyn AnalyzerDb, struct_: StructId) -> DepGra
             graph.extend(subgraph.all_edges())
         }
     }
-    DepGraphWrapper(Rc::new(graph))
+
+    Analysis::new(
+        DepGraphWrapper(Rc::new(graph)),
+        scope.diagnostics.take().into(),
+    )
+}
+
+pub fn struct_cycle(
+    db: &dyn AnalyzerDb,
+    _cycle: &[String],
+    struct_: &StructId,
+) -> Analysis<DepGraphWrapper> {
+    let mut scope = ItemScope::new(db, struct_.module(db));
+    let struct_data = &struct_.data(db).ast;
+    scope.error(
+        &format!("recursive struct `{}`", struct_data.name()),
+        struct_data.kind.name.span,
+        &format!(
+            "struct `{}` has infinite size due to recursive definition",
+            struct_data.name(),
+        ),
+    );
+
+    Analysis::new(
+        DepGraphWrapper(Rc::new(DepGraph::new())),
+        scope.diagnostics.take().into(),
+    )
 }

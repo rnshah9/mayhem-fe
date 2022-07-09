@@ -1,6 +1,7 @@
 use crate::context::{AnalyzerContext, DiagnosticVoucher};
+use crate::display::Displayable;
 use crate::errors::{FatalError, TypeError};
-use crate::namespace::types::{EventField, FixedSize, FunctionParam};
+use crate::namespace::types::{EventField, FunctionParam, Generic, Type, TypeId};
 use crate::traversal::expressions::assignable_expr;
 use fe_common::{diagnostics::Label, utils::humanize::pluralize_conditionally};
 use fe_common::{Span, Spanned};
@@ -10,14 +11,14 @@ use smol_str::SmolStr;
 
 pub trait LabeledParameter {
     fn label(&self) -> Option<&str>;
-    fn typ(&self) -> Result<FixedSize, TypeError>;
+    fn typ(&self) -> Result<TypeId, TypeError>;
 }
 
 impl LabeledParameter for FunctionParam {
     fn label(&self) -> Option<&str> {
         self.label()
     }
-    fn typ(&self) -> Result<FixedSize, TypeError> {
+    fn typ(&self) -> Result<TypeId, TypeError> {
         self.typ.clone()
     }
 }
@@ -26,16 +27,16 @@ impl LabeledParameter for EventField {
     fn label(&self) -> Option<&str> {
         Some(&self.name)
     }
-    fn typ(&self) -> Result<FixedSize, TypeError> {
+    fn typ(&self) -> Result<TypeId, TypeError> {
         self.typ.clone()
     }
 }
 
-impl LabeledParameter for (SmolStr, Result<FixedSize, TypeError>) {
+impl LabeledParameter for (SmolStr, Result<TypeId, TypeError>) {
     fn label(&self) -> Option<&str> {
         Some(&self.0)
     }
-    fn typ(&self) -> Result<FixedSize, TypeError> {
+    fn typ(&self) -> Result<TypeId, TypeError> {
         self.1.clone()
     }
 }
@@ -97,6 +98,7 @@ pub fn validate_named_args(
     params: &[impl LabeledParameter],
 ) -> Result<(), FatalError> {
     validate_arg_count(context, name, name_span, args, params.len(), "argument");
+    // TODO: if the first arg is missing, every other arg will get a label and type error
 
     for (index, (param, arg)) in params.iter().zip(args.kind.iter()).enumerate() {
         let expected_label = param.label();
@@ -149,9 +151,8 @@ pub fn validate_named_args(
         }
 
         let param_type = param.typ()?;
-        let val_attrs =
-            assignable_expr(context, &arg.kind.value, Some(&param_type.clone().into()))?;
-        if param_type != val_attrs.typ {
+        let val_attrs = assignable_expr(context, &arg.kind.value, Some(param_type))?;
+        if !validate_arg_type(context, arg, val_attrs.typ, param_type) {
             let msg = if let Some(label) = param.label() {
                 format!("incorrect type for `{}` argument `{}`", name, label)
             } else {
@@ -160,8 +161,40 @@ pub fn validate_named_args(
                     name, index
                 )
             };
-            context.type_error(&msg, arg.kind.value.span, &param_type, &val_attrs.typ);
+            context.type_error(&msg, arg.kind.value.span, param_type, val_attrs.typ);
         }
     }
     Ok(())
+}
+
+fn validate_arg_type(
+    context: &mut dyn AnalyzerContext,
+    arg: &Node<fe::CallArg>,
+    arg_type: TypeId,
+    param_type: TypeId,
+) -> bool {
+    if let Type::Generic(Generic { bounds, .. }) = param_type.typ(context.db()) {
+        for bound in bounds.iter() {
+            if !bound.is_implemented_for(context.db(), arg_type) {
+                context.error(
+                    &format!(
+                        "the trait bound `{}: {}` is not satisfied",
+                        arg_type.display(context.db()),
+                        bound.name(context.db())
+                    ),
+                    arg.span,
+                    &format!(
+                        "the trait `{}` is not implemented for `{}`",
+                        bound.name(context.db()),
+                        arg_type.display(context.db()),
+                    ),
+                );
+
+                return false;
+            }
+        }
+        true
+    } else {
+        arg_type == param_type
+    }
 }

@@ -17,7 +17,9 @@ impl PrettyPrint for InstId {
         if let Some(result) = store.inst_result(*self) {
             result.pretty_print(db, store, w)?;
             write!(w, ": ")?;
-            store.value_ty(result).pretty_print(db, store, w)?;
+
+            let result_ty = result.ty(db, store);
+            result_ty.pretty_print(db, store, w)?;
             write!(w, " = ")?;
         }
 
@@ -27,14 +29,6 @@ impl PrettyPrint for InstId {
                 local.pretty_print(db, store, w)?;
                 write!(w, ": ")?;
                 store.value_ty(*local).pretty_print(db, store, w)
-            }
-
-            InstKind::Assign { lhs, rhs } => {
-                lhs.pretty_print(db, store, w)?;
-                write!(w, ": ")?;
-                store.value_ty(*lhs).pretty_print(db, store, w)?;
-                write!(w, " = ")?;
-                rhs.pretty_print(db, store, w)
             }
 
             InstKind::Unary { op, value } => {
@@ -73,11 +67,24 @@ impl PrettyPrint for InstId {
                 write!(w, "}}")
             }
 
-            InstKind::AggregateAccess { value, index } => {
+            InstKind::Bind { src } => {
+                write!(w, "bind ")?;
+                src.pretty_print(db, store, w)
+            }
+
+            InstKind::MemCopy { src } => {
+                write!(w, "memcopy ")?;
+                src.pretty_print(db, store, w)
+            }
+
+            InstKind::AggregateAccess { value, indices } => {
                 value.pretty_print(db, store, w)?;
-                write!(w, ".<")?;
-                index.pretty_print(db, store, w)?;
-                write!(w, ">")
+                for index in indices {
+                    write!(w, ".<")?;
+                    index.pretty_print(db, store, w)?;
+                    write!(w, ">")?
+                }
+                Ok(())
             }
 
             InstKind::MapAccess { value, key } => {
@@ -92,7 +99,7 @@ impl PrettyPrint for InstId {
                 args,
                 call_type,
             } => {
-                let name = func.name_with_class(db);
+                let name = func.debug_name(db);
                 write!(w, "{}@{}(", name, call_type)?;
                 args.as_slice().pretty_print(db, store, w)?;
                 write!(w, ")")
@@ -110,7 +117,10 @@ impl PrettyPrint for InstId {
 
             InstKind::Revert { arg } => {
                 write!(w, "revert ")?;
-                arg.pretty_print(db, store, w)
+                if let Some(arg) = arg {
+                    arg.pretty_print(db, store, w)?;
+                }
+                Ok(())
             }
 
             InstKind::Emit { arg } => {
@@ -119,8 +129,12 @@ impl PrettyPrint for InstId {
             }
 
             InstKind::Return { arg } => {
-                write!(w, "return ")?;
-                arg.pretty_print(db, store, w)
+                if let Some(arg) = arg {
+                    write!(w, "return ")?;
+                    arg.pretty_print(db, store, w)
+                } else {
+                    write!(w, "return")
+                }
             }
 
             InstKind::Keccak256 { arg } => {
@@ -128,19 +142,13 @@ impl PrettyPrint for InstId {
                 arg.pretty_print(db, store, w)
             }
 
-            InstKind::Clone { arg } => {
-                write!(w, "clone ")?;
-                arg.pretty_print(db, store, w)
-            }
-
-            InstKind::ToMem { arg } => {
-                write!(w, "to_mem ")?;
-                arg.pretty_print(db, store, w)
-            }
-
             InstKind::AbiEncode { arg } => {
                 write!(w, "abi_encode ")?;
                 arg.pretty_print(db, store, w)
+            }
+
+            InstKind::Nop => {
+                write!(w, "nop")
             }
 
             InstKind::Create { value, contract } => {
@@ -166,7 +174,7 @@ impl PrettyPrint for InstId {
             InstKind::YulIntrinsic { op, args } => {
                 write!(w, "{}(", op)?;
                 args.as_slice().pretty_print(db, store, w)?;
-                write!(w, "{})", op)
+                write!(w, ")")
             }
         }
     }

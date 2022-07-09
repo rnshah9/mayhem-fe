@@ -1,42 +1,46 @@
 use crate::builtins::{ContractTypeMethod, GlobalFunction, Intrinsic, ValueMethod};
-use crate::context::{AnalyzerContext, CallType, ExpressionAttributes, Location, NamedThing};
-use crate::errors::{FatalError, IndexingError, NotFixedSize};
-use crate::namespace::items::{Class, FunctionId, Item, TypeDef};
-use crate::namespace::scopes::BlockScopeType;
-use crate::namespace::types::{
-    Array, Base, Contract, FeString, Integer, Struct, Tuple, Type, TypeDowncast, U256,
+use crate::context::{
+    AnalyzerContext, CallType, Constant, ExpressionAttributes, Location, NamedThing,
 };
+use crate::display::Displayable;
+use crate::errors::{FatalError, IndexingError};
+use crate::namespace::items::{FunctionId, ImplId, Item, StructId, TypeDef};
+use crate::namespace::scopes::BlockScopeType;
+use crate::namespace::types::{Array, Base, FeString, Integer, Tuple, Type, TypeDowncast, TypeId};
 use crate::operations;
 use crate::traversal::call_args::{validate_arg_count, validate_named_args};
+use crate::traversal::const_expr::eval_expr;
 use crate::traversal::types::apply_generic_type_args;
-use crate::traversal::utils::{add_bin_operations_errors, types_to_fixed_sizes};
+use crate::traversal::utils::add_bin_operations_errors;
+
 use fe_common::diagnostics::Label;
 use fe_common::{numeric, Span};
 use fe_parser::ast as fe;
-use fe_parser::ast::UnaryOperator;
+use fe_parser::ast::GenericArg;
 use fe_parser::node::Node;
 use num_bigint::BigInt;
+use num_traits::ToPrimitive;
 use smol_str::SmolStr;
 use std::ops::RangeInclusive;
+use std::rc::Rc;
 use std::str::FromStr;
-use vec1::Vec1;
 
 /// Gather context information for expressions and check for type errors.
 pub fn expr(
     context: &mut dyn AnalyzerContext,
     exp: &Node<fe::Expr>,
-    expected_type: Option<&Type>,
+    expected_type: Option<TypeId>,
 ) -> Result<ExpressionAttributes, FatalError> {
     let attributes = match &exp.kind {
         fe::Expr::Name(_) => expr_name(context, exp, expected_type),
         fe::Expr::Path(_) => expr_path(context, exp, expected_type),
-        fe::Expr::Num(_) => Ok(expr_num(context, exp, expected_type.as_int())),
-        fe::Expr::Bool(_) => expr_bool(exp),
+        fe::Expr::Num(_) => Ok(expr_num(context, exp, expected_type)),
+
         fe::Expr::Subscript { .. } => expr_subscript(context, exp),
         fe::Expr::Attribute { .. } => expr_attribute(context, exp),
         fe::Expr::Ternary { .. } => expr_ternary(context, exp),
         fe::Expr::BoolOperation { .. } => expr_bool_operation(context, exp),
-        fe::Expr::BinOperation { .. } => expr_bin_operation(context, exp, expected_type.as_int()),
+        fe::Expr::BinOperation { .. } => expr_bin_operation(context, exp, expected_type),
         fe::Expr::UnaryOperation { .. } => expr_unary_operation(context, exp, expected_type),
         fe::Expr::CompOperation { .. } => expr_comp_operation(context, exp),
         fe::Expr::Call {
@@ -44,10 +48,18 @@ pub fn expr(
             generic_args,
             args,
         } => expr_call(context, func, generic_args, args),
-        fe::Expr::List { elts } => expr_list(context, elts, expected_type.as_array()),
-        fe::Expr::Tuple { .. } => expr_tuple(context, exp, expected_type.as_tuple()),
-        fe::Expr::Str(_) => expr_str(context, exp, expected_type.as_string()),
-        fe::Expr::Unit => Ok(ExpressionAttributes::new(Type::unit(), Location::Value)),
+        fe::Expr::List { elts } => expr_list(context, elts, expected_type),
+        fe::Expr::Repeat { .. } => expr_repeat(context, exp, expected_type),
+        fe::Expr::Tuple { .. } => expr_tuple(context, exp, expected_type),
+        fe::Expr::Str(_) => expr_str(context, exp, expected_type),
+        fe::Expr::Bool(_) => Ok(ExpressionAttributes::new(
+            TypeId::bool(context.db()),
+            Location::Value,
+        )),
+        fe::Expr::Unit => Ok(ExpressionAttributes::new(
+            TypeId::unit(context.db()),
+            Location::Value,
+        )),
     }?;
 
     context.add_expression(exp, attributes.clone());
@@ -57,80 +69,129 @@ pub fn expr(
 pub fn expr_list(
     context: &mut dyn AnalyzerContext,
     elts: &[Node<fe::Expr>],
-    expected_type: Option<&Array>,
+    expected_type: Option<TypeId>,
 ) -> Result<ExpressionAttributes, FatalError> {
+    let expected_inner = expected_type
+        .map(|id| id.typ(context.db()))
+        .as_ref()
+        .as_array()
+        .map(|arr| arr.inner);
+
     if elts.is_empty() {
         return Ok(ExpressionAttributes {
-            typ: Type::Array(Array {
+            typ: context.db().intern_type(Type::Array(Array {
                 size: 0,
-                inner: expected_type.map_or(Base::Unit, |arr| arr.inner),
-            }),
+                inner: expected_inner.unwrap_or_else(|| TypeId::unit(context.db())),
+            })),
             location: Location::Memory,
             move_location: None,
             const_value: None,
         });
     }
 
-    let inner_type = if let Some(expected) = expected_type {
+    let inner_type = if let Some(inner) = expected_inner {
         for elt in elts {
-            let element_attributes =
-                assignable_expr(context, elt, Some(&Type::Base(expected.inner)))?;
-            if element_attributes.typ != Type::Base(expected.inner) {
-                context.type_error(
-                    "type mismatch",
-                    elt.span,
-                    &expected.inner,
-                    &element_attributes.typ,
-                );
+            let element_attributes = assignable_expr(context, elt, Some(inner))?;
+            if element_attributes.typ != inner {
+                context.type_error("type mismatch", elt.span, inner, element_attributes.typ);
             }
         }
-        expected.inner
+        inner
     } else {
         let first_attr = assignable_expr(context, &elts[0], None)?;
-        let inner = match first_attr.typ {
-            Type::Base(base) => base,
-            _ => {
-                return Err(FatalError::new(context.error(
-                    "arrays can only hold primitive types",
-                    elts[0].span,
-                    &format!(
-                        "this has type `{}`; expected a primitive type",
-                        first_attr.typ
-                    ),
-                )));
-            }
-        };
 
         // Assuming every element attribute should match the attribute of 0th element
         // of list.
         for elt in &elts[1..] {
-            let element_attributes = assignable_expr(context, elt, Some(&first_attr.typ))?;
+            let element_attributes = assignable_expr(context, elt, Some(first_attr.typ))?;
             if element_attributes.typ != first_attr.typ {
                 context.fancy_error(
                     "array elements must have same type",
                     vec![
-                        Label::primary(elts[0].span, format!("this has type `{}`", first_attr.typ)),
+                        Label::primary(
+                            elts[0].span,
+                            format!("this has type `{}`", first_attr.typ.display(context.db())),
+                        ),
                         Label::secondary(
                             elt.span,
-                            format!("this has type `{}`", element_attributes.typ),
+                            format!(
+                                "this has type `{}`",
+                                element_attributes.typ.display(context.db())
+                            ),
                         ),
                     ],
                     vec![],
                 );
             }
         }
-        inner
-    };
-
-    // TODO: Right now we are only supporting Base type arrays
-    // Potentially we can support tuples as well.
-    let array_typ = Array {
-        size: elts.len(),
-        inner: inner_type,
+        first_attr.typ
     };
 
     Ok(ExpressionAttributes {
-        typ: Type::Array(array_typ),
+        typ: context.db().intern_type(Type::Array(Array {
+            size: elts.len(),
+            inner: inner_type,
+        })),
+        location: Location::Memory,
+        move_location: None,
+        const_value: None,
+    })
+}
+
+pub fn expr_repeat(
+    context: &mut dyn AnalyzerContext,
+    expr: &Node<fe::Expr>,
+    expected_type: Option<TypeId>,
+) -> Result<ExpressionAttributes, FatalError> {
+    let (value, len) = if let fe::Expr::Repeat { value, len } = &expr.kind {
+        (value, len)
+    } else {
+        unreachable!()
+    };
+
+    let value = assignable_expr(context, value, None)?;
+
+    let size = match &len.kind {
+        GenericArg::Int(size) => size.kind,
+        GenericArg::TypeDesc(_) => {
+            return Err(FatalError::new(context.fancy_error(
+                "expected a constant u256 value",
+                vec![Label::primary(len.span, "Array length")],
+                vec!["Note: Array length must be a constant u256".to_string()],
+            )));
+        }
+        GenericArg::ConstExpr(expr) => {
+            assignable_expr(context, expr, None)?;
+            if let Constant::Int(len) = eval_expr(context, expr)? {
+                len.to_usize().unwrap()
+            } else {
+                return Err(FatalError::new(context.fancy_error(
+                    "expected a constant u256 value",
+                    vec![Label::primary(len.span, "Array length")],
+                    vec!["Note: Array length must be a constant u256".to_string()],
+                )));
+            }
+        }
+    };
+
+    let array_typ = context.db().intern_type(Type::Array(Array {
+        size,
+        inner: value.typ,
+    }));
+
+    if let Some(expected_typ) = expected_type {
+        if expected_typ.typ(context.db()) != array_typ.typ(context.db()) {
+            return Err(FatalError::new(context.type_error(
+                "type mismatch",
+                expr.span,
+                expected_typ,
+                array_typ,
+            )));
+        }
+    }
+
+    Ok(ExpressionAttributes {
+        typ: array_typ,
         location: Location::Memory,
         move_location: None,
         const_value: None,
@@ -143,16 +204,17 @@ pub fn expr_list(
 pub fn value_expr(
     context: &mut dyn AnalyzerContext,
     exp: &Node<fe::Expr>,
-    expected_type: Option<&Type>,
+    expected_type: Option<TypeId>,
 ) -> Result<ExpressionAttributes, FatalError> {
     let original_attributes = expr(context, exp, expected_type)?;
-    let attributes = original_attributes.clone().into_loaded().map_err(|_| {
+    let typ = original_attributes.typ;
+    let attributes = original_attributes.into_loaded(context.db()).map_err(|_| {
         FatalError::new(context.fancy_error(
             "can't move value onto stack",
             vec![Label::primary(exp.span, "Value to be moved")],
             vec![format!(
                 "Note: Can't move `{}` types on the stack",
-                original_attributes.typ
+                typ.display(context.db())
             )],
         ))
     })?;
@@ -168,18 +230,18 @@ pub fn value_expr(
 pub fn assignable_expr(
     context: &mut dyn AnalyzerContext,
     exp: &Node<fe::Expr>,
-    expected_type: Option<&Type>,
+    expected_type: Option<TypeId>,
 ) -> Result<ExpressionAttributes, FatalError> {
     use Type::*;
 
     let mut attributes = expr(context, exp, expected_type)?;
-    match &attributes.typ {
+    match &attributes.typ.typ(context.db()) {
         Base(_) | Contract(_) => {
             if attributes.location != Location::Value {
                 attributes.move_location = Some(Location::Value);
             }
         }
-        Array(_) | Tuple(_) | String(_) | Struct(_) => {
+        Array(_) | Tuple(_) | String(_) | Struct(_) | Generic(_) => {
             if attributes.final_location() != Location::Memory {
                 context.fancy_error(
                     "value must be copied to memory",
@@ -216,37 +278,37 @@ pub fn assignable_expr(
 fn expr_tuple(
     context: &mut dyn AnalyzerContext,
     exp: &Node<fe::Expr>,
-    expected_type: Option<&Tuple>,
+    expected_type: Option<TypeId>,
 ) -> Result<ExpressionAttributes, FatalError> {
+    let expected_items = expected_type
+        .map(|id| id.typ(context.db()))
+        .and_then(|typ| typ.as_tuple().map(|tup| Rc::clone(&tup.items)));
+
     if let fe::Expr::Tuple { elts } = &exp.kind {
         let types = elts
             .iter()
             .enumerate()
             .map(|(idx, elt)| {
-                let exp_type = expected_type
-                    .and_then(|tup| tup.items.get(idx))
-                    .map(|fixed| fixed.clone().into());
-                assignable_expr(context, elt, exp_type.as_ref()).map(|attributes| attributes.typ)
+                let exp_type = expected_items
+                    .as_ref()
+                    .and_then(|items| items.get(idx).copied());
+
+                assignable_expr(context, elt, exp_type).map(|attributes| attributes.typ)
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        let tuple_types = match types_to_fixed_sizes(&types) {
-            Err(NotFixedSize) => {
-                return Err(FatalError::new(context.error(
-                    "variable size types can not be part of tuples",
-                    exp.span,
-                    "",
-                )));
-            }
-            Ok(val) => val,
-        };
-
-        let tuple = Tuple {
-            items: Vec1::try_from_vec(tuple_types).expect("tuple is empty"),
-        };
+        if !&types.iter().all(|id| id.has_fixed_size(context.db())) {
+            return Err(FatalError::new(context.error(
+                "variable size types can not be part of tuples",
+                exp.span,
+                "",
+            )));
+        }
 
         Ok(ExpressionAttributes::new(
-            Type::Tuple(tuple),
+            context.db().intern_type(Type::Tuple(Tuple {
+                items: types.to_vec().into(),
+            })),
             Location::Memory,
         ))
     } else {
@@ -257,7 +319,7 @@ fn expr_tuple(
 fn expr_name(
     context: &mut dyn AnalyzerContext,
     exp: &Node<fe::Expr>,
-    expected_type: Option<&Type>,
+    expected_type: Option<TypeId>,
 ) -> Result<ExpressionAttributes, FatalError> {
     let name = match &exp.kind {
         fe::Expr::Name(name) => name,
@@ -271,7 +333,7 @@ fn expr_name(
 fn expr_path(
     context: &mut dyn AnalyzerContext,
     exp: &Node<fe::Expr>,
-    expected_type: Option<&Type>,
+    expected_type: Option<TypeId>,
 ) -> Result<ExpressionAttributes, FatalError> {
     let path = match &exp.kind {
         fe::Expr::Path(path) => path,
@@ -286,16 +348,16 @@ fn expr_named_thing(
     context: &mut dyn AnalyzerContext,
     exp: &Node<fe::Expr>,
     named_thing: Option<NamedThing>,
-    expected_type: Option<&Type>,
+    expected_type: Option<TypeId>,
 ) -> Result<ExpressionAttributes, FatalError> {
     match named_thing {
         Some(NamedThing::Variable { typ, .. }) => {
-            let typ = typ?;
-            let location = Location::assign_location(&typ);
-            Ok(ExpressionAttributes::new(typ.into(), location))
+            let typ_id = typ?;
+            let location = Location::assign_location(&typ_id.typ(context.db()));
+            Ok(ExpressionAttributes::new(typ_id, location))
         }
-        Some(NamedThing::SelfValue { decl, class, .. }) => {
-            if let Some(class) = class {
+        Some(NamedThing::SelfValue { decl, parent, .. }) => {
+            if let Some(target) = parent {
                 if decl.is_none() {
                     context.fancy_error(
                         "`self` is not defined",
@@ -314,32 +376,56 @@ fn expr_named_thing(
                         },
                     );
                 }
-                match class {
-                    Class::Struct(id) => Ok(ExpressionAttributes::new(
-                        Type::Struct(Struct::from_id(id, context.db())),
+                match target {
+                    Item::Type(TypeDef::Struct(id)) => Ok(ExpressionAttributes::new(
+                        context.db().intern_type(Type::Struct(id)),
                         Location::Memory,
                     )),
-                    Class::Contract(id) => Ok(ExpressionAttributes::new(
-                        Type::SelfContract(Contract::from_id(id, context.db())),
+                    Item::Impl(id) => Ok(ExpressionAttributes::new(
+                        id.receiver(context.db()),
+                        Location::Memory,
+                    )),
+                    // This can only happen when trait methods can implement a default body
+                    Item::Trait(id) => Err(FatalError::new(context.fancy_error(
+                        &format!(
+                            "`{}` is a trait, and can't be used as an expression",
+                            exp.kind
+                        ),
+                        vec![
+                            Label::primary(
+                                id.name_span(context.db()),
+                                &format!("`{}` is defined here as a trait", exp.kind),
+                            ),
+                            Label::primary(
+                                exp.span,
+                                &format!("`{}` is used here as a value", exp.kind),
+                            ),
+                        ],
+                        vec![],
+                    ))),
+                    Item::Type(TypeDef::Contract(id)) => Ok(ExpressionAttributes::new(
+                        context.db().intern_type(Type::SelfContract(id)),
                         Location::Value,
                     )),
+                    _ => unreachable!(),
                 }
             } else {
                 Err(FatalError::new(context.fancy_error(
-                    "`self` can only be used in contract or struct functions",
+                    "`self` can only be used in contract, struct, trait or impl functions",
                     vec![Label::primary(
                         exp.span,
-                        "not allowed in functions defined outside of a contract or struct",
+                        "not allowed in functions defined directly in a module",
                     )],
                     vec![],
                 )))
             }
         }
         Some(NamedThing::Item(Item::Constant(id))) => {
-            let typ = id
-                .typ(context.db())?
-                .try_into()
-                .expect("const type must be fixed size");
+            let typ = id.typ(context.db())?;
+
+            if !typ.has_fixed_size(context.db()) {
+                panic!("const type must be fixed size")
+            }
 
             // Check visibility of constant.
             if !id.is_public(context.db()) && id.module(context.db()) != context.module() {
@@ -364,8 +450,8 @@ fn expr_named_thing(
                 );
             }
 
-            let location = Location::assign_location(&typ);
-            Ok(ExpressionAttributes::new(typ.into(), location))
+            let location = Location::assign_location(&typ.typ(context.db()));
+            Ok(ExpressionAttributes::new(typ, location))
         }
         Some(item) => {
             let item_kind = item.item_kind_display_name();
@@ -407,10 +493,8 @@ fn expr_named_thing(
             );
             match expected_type {
                 Some(typ) => Ok(ExpressionAttributes::new(
-                    typ.clone(),
-                    Location::assign_location(
-                        &typ.clone().try_into().map_err(|_| FatalError::new(diag))?,
-                    ),
+                    typ,
+                    Location::assign_location(&typ.typ(context.db())),
                 )),
                 None => Err(FatalError::new(diag)),
             }
@@ -421,16 +505,14 @@ fn expr_named_thing(
 fn expr_str(
     context: &mut dyn AnalyzerContext,
     exp: &Node<fe::Expr>,
-    expected_type: Option<&FeString>,
+    expected_type: Option<TypeId>,
 ) -> Result<ExpressionAttributes, FatalError> {
     if let fe::Expr::Str(string) = &exp.kind {
         if !is_valid_string(string) {
             context.error("String contains invalid byte sequence", exp.span, "");
         };
 
-        if context.is_in_function() {
-            context.add_string(string.clone());
-        } else {
+        if !context.is_in_function() {
             context.fancy_error(
                 "string literal can't be used outside function",
                 vec![Label::primary(exp.span, "string type is used here")],
@@ -439,7 +521,9 @@ fn expr_str(
         }
 
         let str_len = string.len();
-        let expected_str_len = expected_type.map(|typ| typ.max_size).unwrap_or(str_len);
+        let expected_str_len = expected_type
+            .and_then(|id| id.typ(context.db()).as_string().map(|s| s.max_size))
+            .unwrap_or(str_len);
         // Use an expected string length if an expected length is larger than an actual
         // length.
         let max_size = if expected_str_len > str_len {
@@ -449,7 +533,9 @@ fn expr_str(
         };
 
         return Ok(ExpressionAttributes::new(
-            Type::String(FeString { max_size }),
+            context
+                .db()
+                .intern_type(Type::String(FeString { max_size })),
             Location::Memory,
         ));
     }
@@ -476,30 +562,22 @@ fn is_valid_string(val: &str) -> bool {
     true
 }
 
-fn expr_bool(exp: &Node<fe::Expr>) -> Result<ExpressionAttributes, FatalError> {
-    if let fe::Expr::Bool(_) = &exp.kind {
-        return Ok(ExpressionAttributes::new(
-            Type::Base(Base::Bool),
-            Location::Value,
-        ));
-    }
-
-    unreachable!()
-}
-
 fn expr_num(
     context: &mut dyn AnalyzerContext,
     exp: &Node<fe::Expr>,
-    expected_type: Option<Integer>,
+    expected_type: Option<TypeId>,
 ) -> ExpressionAttributes {
-    if let fe::Expr::Num(num) = &exp.kind {
-        let int_typ = expected_type.unwrap_or(Integer::U256);
-        let num = to_bigint(num);
-        validate_numeric_literal_fits_type(context, num, exp.span, int_typ);
-        return ExpressionAttributes::new(Type::int(int_typ), Location::Value);
-    }
+    let num = match &exp.kind {
+        fe::Expr::Num(num) => num,
+        _ => unreachable!(),
+    };
 
-    unreachable!()
+    let int_typ = expected_type
+        .and_then(|id| id.typ(context.db()).as_int())
+        .unwrap_or(Integer::U256);
+    let num = to_bigint(num);
+    validate_numeric_literal_fits_type(context, num, exp.span, int_typ);
+    return ExpressionAttributes::new(TypeId::int(context.db(), int_typ), Location::Value);
 }
 
 fn expr_subscript(
@@ -511,33 +589,39 @@ fn expr_subscript(
         let index_attributes = value_expr(context, index, None)?;
 
         // performs type checking
-        let typ =
-            match operations::index(value_attributes.typ.clone(), index_attributes.typ.clone()) {
-                Err(IndexingError::NotSubscriptable) => {
-                    return Err(FatalError::new(context.fancy_error(
-                        &format!("`{}` type is not subscriptable", value_attributes.typ),
-                        vec![Label::primary(value.span, "unsubscriptable type")],
-                        vec!["Note: Only arrays and maps are subscriptable".into()],
-                    )));
-                }
-                Err(IndexingError::WrongIndexType) => {
-                    return Err(FatalError::new(context.fancy_error(
-                        &format!(
-                            "can not subscript {} with type {}",
-                            value_attributes.typ, index_attributes.typ
-                        ),
-                        vec![Label::primary(index.span, "wrong index type")],
-                        vec![],
-                    )));
-                }
-                Ok(val) => val,
-            };
+        let typ = match operations::index(context.db(), value_attributes.typ, index_attributes.typ)
+        {
+            Err(IndexingError::NotSubscriptable) => {
+                return Err(FatalError::new(context.fancy_error(
+                    &format!(
+                        "`{}` type is not subscriptable",
+                        value_attributes.typ.display(context.db())
+                    ),
+                    vec![Label::primary(value.span, "unsubscriptable type")],
+                    vec!["Note: Only arrays and maps are subscriptable".into()],
+                )));
+            }
+            Err(IndexingError::WrongIndexType) => {
+                return Err(FatalError::new(context.fancy_error(
+                    &format!(
+                        "can not subscript {} with type {}",
+                        value_attributes.typ.display(context.db()),
+                        index_attributes.typ.display(context.db())
+                    ),
+                    vec![Label::primary(index.span, "wrong index type")],
+                    vec![],
+                )));
+            }
+            Ok(val) => val,
+        };
 
         let location = match value_attributes.location {
             Location::Storage { .. } => Location::Storage { nonce: None },
             Location::Memory => Location::Memory,
             // neither maps or arrays can be stored as values, so this is unreachable
             Location::Value => unreachable!(),
+            // Generics can't be subscritpable
+            Location::Unresolved => unreachable!(),
         };
 
         return Ok(ExpressionAttributes::new(typ, location));
@@ -556,8 +640,8 @@ fn expr_attribute(
     };
 
     let attrs = expr(context, target, None)?;
-    return match attrs.typ {
-        Type::SelfContract(contract) => match contract.id.field_type(context.db(), &field.kind) {
+    return match attrs.typ.typ(context.db()) {
+        Type::SelfContract(id) => match id.field_type(context.db(), &field.kind) {
             Some((typ, nonce)) => Ok(ExpressionAttributes::new(
                 typ?,
                 Location::Storage { nonce: Some(nonce) },
@@ -571,28 +655,29 @@ fn expr_attribute(
         // If the value is a struct, we return the type of the struct field. The location stays the
         // same and can be memory or storage.
         Type::Struct(struct_) => {
-            if let Some(struct_field) = struct_.id.field(context.db(), &field.kind) {
-                if !context.root_item().is_struct(&struct_.id)
-                    && !struct_field.is_public(context.db())
+            if let Some(struct_field) = struct_.field(context.db(), &field.kind) {
+                if !context.root_item().is_struct(&struct_) && !struct_field.is_public(context.db())
                 {
                     context.fancy_error(
                         &format!(
                             "Can not access private field `{}` on struct `{}`",
-                            &field.kind, struct_.name
+                            &field.kind,
+                            struct_.name(context.db())
                         ),
                         vec![Label::primary(field.span, "private field")],
                         vec![],
                     );
                 }
                 Ok(ExpressionAttributes::new(
-                    struct_field.typ(context.db())?.into(),
+                    struct_field.typ(context.db())?,
                     attrs.location,
                 ))
             } else {
                 Err(FatalError::new(context.fancy_error(
                     &format!(
                         "No field `{}` exists on struct `{}`",
-                        &field.kind, struct_.name
+                        &field.kind,
+                        struct_.name(context.db())
                     ),
                     vec![Label::primary(field.span, "undefined field")],
                     vec![],
@@ -617,10 +702,7 @@ fn expr_attribute(
             };
 
             if let Some(typ) = tuple.items.get(item_index) {
-                Ok(ExpressionAttributes::new(
-                    typ.clone().into(),
-                    attrs.location,
-                ))
+                Ok(ExpressionAttributes::new(*typ, attrs.location))
             } else {
                 Err(FatalError::new(context.fancy_error(
                     &format!("No field `item{}` exists on this tuple", item_index),
@@ -633,7 +715,11 @@ fn expr_attribute(
             }
         }
         _ => Err(FatalError::new(context.fancy_error(
-            &format!("No field `{}` exists on type {}", &field.kind, attrs.typ),
+            &format!(
+                "No field `{}` exists on type {}",
+                &field.kind,
+                attrs.typ.display(context.db())
+            ),
             vec![Label::primary(field.span, "unknown field")],
             vec![],
         ))),
@@ -652,48 +738,52 @@ fn tuple_item_index(item: &str) -> Option<usize> {
 fn expr_bin_operation(
     context: &mut dyn AnalyzerContext,
     exp: &Node<fe::Expr>,
-    expected_type: Option<Integer>,
+    expected_type: Option<TypeId>,
 ) -> Result<ExpressionAttributes, FatalError> {
-    if let fe::Expr::BinOperation { left, op, right } = &exp.kind {
-        let (left_expected, right_expected) = match &op.kind {
-            // In shift operations, the right hand side may have a different type than the left hand
-            // side because the right hand side needs to be unsigned. The type of the
-            // entire expression is determined by the left hand side anyway so we don't
-            // try to coerce the right hand side in this case.
-            fe::BinOperator::LShift | fe::BinOperator::RShift => {
-                (expected_type.map(Type::int), None)
-            }
-            _ => (expected_type.map(Type::int), expected_type.map(Type::int)),
-        };
+    let (left, op, right) = match &exp.kind {
+        fe::Expr::BinOperation { left, op, right } => (left, op, right),
+        _ => unreachable!(),
+    };
 
-        let left_attributes = value_expr(context, left, left_expected.as_ref())?;
-        let right_attributes = value_expr(context, right, right_expected.as_ref())?;
+    let (left_expected, right_expected) = match &op.kind {
+        // In shift operations, the right hand side may have a different type than the left hand
+        // side because the right hand side needs to be unsigned. The type of the
+        // entire expression is determined by the left hand side anyway so we don't
+        // try to coerce the right hand side in this case.
+        fe::BinOperator::LShift | fe::BinOperator::RShift => (expected_type, None),
+        _ => (expected_type, expected_type),
+    };
 
-        let typ = match operations::bin(&left_attributes.typ, &op.kind, &right_attributes.typ) {
-            Err(err) => {
-                return Err(FatalError::new(add_bin_operations_errors(
-                    context,
-                    &op.kind,
-                    left.span,
-                    &left_attributes.typ,
-                    right.span,
-                    &right_attributes.typ,
-                    err,
-                )));
-            }
-            Ok(val) => val,
-        };
+    let left_attributes = value_expr(context, left, left_expected)?;
+    let right_attributes = value_expr(context, right, right_expected)?;
 
-        return Ok(ExpressionAttributes::new(typ, Location::Value));
-    }
+    let typ = match operations::bin(
+        context.db(),
+        left_attributes.typ,
+        op.kind,
+        right_attributes.typ,
+    ) {
+        Err(err) => {
+            return Err(FatalError::new(add_bin_operations_errors(
+                context,
+                &op.kind,
+                left.span,
+                left_attributes.typ,
+                right.span,
+                right_attributes.typ,
+                err,
+            )));
+        }
+        Ok(val) => val,
+    };
 
-    unreachable!()
+    Ok(ExpressionAttributes::new(typ, Location::Value))
 }
 
 fn expr_unary_operation(
     context: &mut dyn AnalyzerContext,
     exp: &Node<fe::Expr>,
-    expected_type: Option<&Type>,
+    expected_type: Option<TypeId>,
 ) -> Result<ExpressionAttributes, FatalError> {
     if let fe::Expr::UnaryOperation { op, operand } = &exp.kind {
         let operand_attributes = value_expr(context, operand, None)?;
@@ -702,44 +792,62 @@ fn expr_unary_operation(
             context.error(
                 &format!(
                     "cannot apply unary operator `{}` to type `{}`",
-                    op.kind, operand_attributes.typ
+                    op.kind,
+                    operand_attributes.typ.display(context.db())
                 ),
                 operand.span,
                 &format!(
                     "this has type `{}`; expected {}",
-                    operand_attributes.typ, expected
+                    operand_attributes.typ.display(context.db()),
+                    expected
                 ),
             );
         };
 
         return match op.kind {
             fe::UnaryOperator::USub => {
-                let int_type = expected_type.as_int().unwrap_or(Integer::I256);
-                match operand_attributes.typ {
-                    Type::Base(Base::Numeric(_)) => {
-                        if let fe::Expr::Num(num_str) = &operand.kind {
-                            let num = -to_bigint(num_str);
-                            validate_numeric_literal_fits_type(context, num, exp.span, int_type);
-                        }
+                let expected_int_type = expected_type
+                    .and_then(|id| id.typ(context.db()).as_int())
+                    .unwrap_or(Integer::I256);
+                if operand_attributes.typ.is_integer(context.db()) {
+                    if let fe::Expr::Num(num_str) = &operand.kind {
+                        let num = -to_bigint(num_str);
+                        validate_numeric_literal_fits_type(
+                            context,
+                            num,
+                            exp.span,
+                            expected_int_type,
+                        );
                     }
-                    _ => emit_err(context, "a numeric type"),
+                    if !expected_int_type.is_signed() {
+                        context.error(
+                            "Can not apply unary operator",
+                            op.span + operand.span,
+                            &format!(
+                                "Expected unsigned type `{}`. Unary operator `-` can not be used here.",
+                                expected_int_type,
+                            ),
+                        );
+                    }
+                } else {
+                    emit_err(context, "a numeric type")
                 }
                 Ok(ExpressionAttributes::new(
-                    Type::int(int_type),
+                    TypeId::int(context.db(), expected_int_type),
                     Location::Value,
                 ))
             }
             fe::UnaryOperator::Not => {
-                if !matches!(operand_attributes.typ, Type::Base(Base::Bool)) {
+                if !operand_attributes.typ.is_bool(context.db()) {
                     emit_err(context, "type `bool`");
                 }
                 Ok(ExpressionAttributes::new(
-                    Type::Base(Base::Bool),
+                    TypeId::bool(context.db()),
                     Location::Value,
                 ))
             }
-            UnaryOperator::Invert => {
-                if !matches!(operand_attributes.typ, Type::Base(Base::Numeric(_))) {
+            fe::UnaryOperator::Invert => {
+                if !operand_attributes.typ.is_integer(context.db()) {
                     emit_err(context, "a numeric type")
                 }
 
@@ -770,10 +878,13 @@ fn expr_call(
         _ => {
             let expression = expr(context, func, None)?;
             return Err(FatalError::new(context.fancy_error(
-                &format!("`{}` type is not callable", expression.typ),
+                &format!(
+                    "`{}` type is not callable",
+                    expression.typ.display(context.db())
+                ),
                 vec![Label::primary(
                     func.span,
-                    format!("this has type `{}`", expression.typ),
+                    format!("this has type `{}`", expression.typ.display(context.db())),
                 )],
                 vec![],
             )));
@@ -825,8 +936,10 @@ fn expr_call_name<T: std::fmt::Display>(
         if context.is_in_function() {
             let func_id = context.parent_function();
             if let Some(function) = func_id
-                .class(context.db())
-                .and_then(|class| class.self_function(context.db(), name))
+                .sig(context.db())
+                .self_item(context.db())
+                .and_then(|target| target.function_sig(context.db(), name))
+                .filter(|fun| fun.takes_self(context.db()))
             {
                 // TODO: this doesn't have to be fatal
                 FatalError::new(context.fancy_error(
@@ -900,7 +1013,7 @@ fn expr_call_named_thing<T: std::fmt::Display>(
         NamedThing::Item(Item::Function(function)) => {
             expr_call_pure(context, function, generic_args, args)
         }
-        NamedThing::Item(Item::Type(id)) => {
+        NamedThing::Item(Item::Type(def)) => {
             if let Some(args) = generic_args {
                 context.fancy_error(
                     &format!("`{}` type is not generic", func.kind),
@@ -911,7 +1024,7 @@ fn expr_call_named_thing<T: std::fmt::Display>(
                     vec![],
                 );
             }
-            let typ = id.typ(context.db())?;
+            let typ = def.type_id(context.db())?;
             expr_call_type_constructor(context, typ, func.span, args)
         }
         NamedThing::Item(Item::GenericType(generic)) => {
@@ -929,7 +1042,10 @@ fn expr_call_named_thing<T: std::fmt::Display>(
         NamedThing::Variable { typ, span, .. } => Err(FatalError::new(context.fancy_error(
             &format!("`{}` is not callable", func.kind),
             vec![
-                Label::secondary(span, format!("`{}` has type `{}`", func.kind, typ?)),
+                Label::secondary(
+                    span,
+                    format!("`{}` has type `{}`", func.kind, typ?.display(context.db())),
+                ),
                 Label::primary(
                     func.span,
                     format!("`{}` can't be used as a function", func.kind),
@@ -943,7 +1059,7 @@ fn expr_call_named_thing<T: std::fmt::Display>(
             &format!(
                 "`{}` is a constant of type `{}`, and can't be used as a function",
                 func.kind,
-                id.typ(context.db())?,
+                id.typ(context.db())?.display(context.db()),
             ),
         ))),
         NamedThing::Item(Item::Event(_)) => Err(FatalError::new(context.fancy_error(
@@ -960,6 +1076,15 @@ fn expr_call_named_thing<T: std::fmt::Display>(
                 func.kind
             )],
         ))),
+        NamedThing::Item(Item::Trait(_)) => Err(FatalError::new(context.error(
+            &format!("`{}` is not callable", func.kind),
+            func.span,
+            &format!(
+                "`{}` is a trait, and can't be used as a function",
+                func.kind
+            ),
+        ))),
+        NamedThing::Item(Item::Impl(_)) => unreachable!(),
         NamedThing::Item(Item::Ingot(_)) => Err(FatalError::new(context.error(
             &format!("`{}` is not callable", func.kind),
             func.span,
@@ -1005,28 +1130,25 @@ fn expr_call_builtin_function(
             expect_no_label_on_arg(context, args, 0);
 
             if let Some(arg_typ) = argument_attributes.first().map(|attr| &attr.typ) {
-                if !matches!(
-                    arg_typ,
-                    Type::Array(Array {
-                        inner: Base::Numeric(Integer::U8),
-                        ..
-                    })
-                ) {
-                    context.fancy_error(
-                        &format!(
-                            "`{}` can not be used as an argument to `{}`",
-                            arg_typ,
-                            function.as_ref(),
-                        ),
-                        vec![Label::primary(args.span, "wrong type")],
-                        vec![format!(
-                            "Note: `{}` expects a byte array argument",
-                            function.as_ref()
-                        )],
-                    );
+                match arg_typ.typ(context.db()) {
+                    Type::Array(Array { inner, .. }) if inner.typ(context.db()) == Type::u8() => {}
+                    _ => {
+                        context.fancy_error(
+                            &format!(
+                                "`{}` can not be used as an argument to `{}`",
+                                arg_typ.display(context.db()),
+                                function.as_ref(),
+                            ),
+                            vec![Label::primary(args.span, "wrong type")],
+                            vec![format!(
+                                "Note: `{}` expects a byte array argument",
+                                function.as_ref()
+                            )],
+                        );
+                    }
                 }
             };
-            ExpressionAttributes::new(Type::Base(U256), Location::Value)
+            ExpressionAttributes::new(TypeId::int(context.db(), Integer::U256), Location::Value)
         }
     };
     Ok((attrs, CallType::BuiltinFunction(function)))
@@ -1061,18 +1183,21 @@ fn expr_call_intrinsic(
         "arguments",
     );
     for (idx, arg_attr) in argument_attributes.iter().enumerate() {
-        if arg_attr.typ != Type::Base(Base::Numeric(Integer::U256)) {
+        if arg_attr.typ.typ(context.db()) != Type::Base(Base::Numeric(Integer::U256)) {
             context.type_error(
                 "arguments to intrinsic functions must be u256",
                 args.kind[idx].kind.value.span,
-                &Integer::U256,
-                &arg_attr.typ,
+                TypeId::int(context.db(), Integer::U256),
+                arg_attr.typ,
             );
         }
     }
 
     Ok((
-        ExpressionAttributes::new(Type::Base(function.return_type()), Location::Value),
+        ExpressionAttributes::new(
+            TypeId::base(context.db(), function.return_type()),
+            Location::Value,
+        ),
         CallType::Intrinsic(function),
     ))
 }
@@ -1100,56 +1225,39 @@ fn expr_call_pure(
     validate_named_args(context, &fn_name, name_span, args, &sig.params)?;
 
     let return_type = sig.return_type.clone()?;
-    let return_location = Location::assign_location(&return_type);
+    let return_location = Location::assign_location(&return_type.typ(context.db()));
     Ok((
-        ExpressionAttributes::new(return_type.into(), return_location),
+        ExpressionAttributes::new(return_type, return_location),
         CallType::Pure(function),
     ))
 }
 
 fn expr_call_type_constructor(
     context: &mut dyn AnalyzerContext,
-    typ: Type,
+    type_id: TypeId,
     name_span: Span,
     args: &Node<Vec<Node<fe::CallArg>>>,
 ) -> Result<(ExpressionAttributes, CallType), FatalError> {
+    let typ = type_id.typ(context.db());
     match typ {
         Type::Struct(struct_type) => {
             return expr_call_struct_constructor(context, name_span, struct_type, args)
         }
-        Type::Base(Base::Bool) => {
+        Type::Base(Base::Bool) | Type::Array(_) | Type::Map(_) | Type::Generic(_) => {
             return Err(FatalError::new(context.error(
-                "`bool` type is not callable",
+                &format!("`{}` type is not callable", typ.display(context.db())),
                 name_span,
                 "",
             )))
         }
-        Type::Map(_) => {
-            return Err(FatalError::new(context.error(
-                "`Map` type is not callable",
-                name_span,
-                "",
-            )))
-        }
-        Type::Array(_) => {
-            return Err(FatalError::new(context.error(
-                "`Array` type is not callable",
-                name_span,
-                "",
-            )))
-        }
+
         _ => {}
     }
 
-    if matches!(typ, Type::Contract(_)) {
-        validate_arg_count(context, &format!("{}", typ), name_span, args, 2, "argument");
-        expect_no_label_on_arg(context, args, 0);
-        expect_no_label_on_arg(context, args, 1);
-    } else {
-        // These all expect 1 arg, for now.
-        validate_arg_count(context, &format!("{}", typ), name_span, args, 1, "argument");
-        expect_no_label_on_arg(context, args, 0);
-    }
+    // These all expect 1 arg, for now.
+    let type_name = typ.name(context.db());
+    validate_arg_count(context, &type_name, name_span, args, 1, "argument");
+    expect_no_label_on_arg(context, args, 0);
 
     let expr_attrs = match &typ {
         Type::String(string_type) => {
@@ -1157,68 +1265,30 @@ fn expr_call_type_constructor(
                 assignable_expr(context, &arg.kind.value, None)?;
                 validate_str_literal_fits_type(context, &arg.kind.value, string_type);
             }
-            ExpressionAttributes::new(typ.clone(), Location::Memory)
+            ExpressionAttributes::new(type_id, Location::Memory)
         }
         Type::Contract(_) => {
-            if let Some(first_arg) = &args.kind.get(0) {
-                let first_arg_attr = assignable_expr(context, &first_arg.kind.value, None)?;
-                if let Some(context_type) = context.get_context_type() {
-                    if first_arg_attr.typ != Type::Struct(context_type.clone()) {
-                        context.type_error(
-                            "type mismatch",
-                            first_arg.span,
-                            &context_type,
-                            &first_arg_attr.typ,
-                        );
-                    }
-                } else {
-                    context.fancy_error(
-                        "`Context` is not defined",
-                        vec![
-                            Label::primary(
-                                args.span,
-                                "`ctx` must be defined and passed into the contract constructor",
-                            ),
-                            Label::secondary(
-                                context.parent_function().name_span(context.db()),
-                                "Note: declare `ctx` in this function signature",
-                            ),
-                            Label::secondary(
-                                context.parent_function().name_span(context.db()),
-                                "Example: `pub fn foo(ctx: Context, ...)`",
-                            ),
-                        ],
-                        vec![
-                            "Note: import context with `use std::context::Context`".into(),
-                            "Example: MyContract(ctx, contract_address)".into(),
-                        ],
-                    );
+            if let Some(arg) = &args.kind.get(0) {
+                let arg_attr = assignable_expr(context, &arg.kind.value, None)?;
+                let addr = TypeId::base(context.db(), Base::Address);
+                if arg_attr.typ != addr {
+                    context.type_error("type mismatch", arg.span, addr, arg_attr.typ);
                 }
             }
-            if let Some(second_arg) = &args.kind.get(1) {
-                let second_arg_attr = assignable_expr(context, &second_arg.kind.value, None)?;
-                if second_arg_attr.typ != Type::Base(Base::Address) {
-                    context.type_error(
-                        "type mismatch",
-                        second_arg.span,
-                        &Base::Address,
-                        &second_arg_attr.typ,
-                    );
-                }
-            }
-            ExpressionAttributes::new(typ.clone(), Location::Value)
+            ExpressionAttributes::new(type_id, Location::Value)
         }
         Type::Base(Base::Numeric(integer)) => {
             if let Some(arg) = args.kind.first() {
                 // This will check if the literal fits inside int_type.
-                let arg_exp = assignable_expr(context, &arg.kind.value, Some(&typ))?;
-                match arg_exp.typ {
+                let arg_exp = assignable_expr(context, &arg.kind.value, Some(type_id))?;
+                let arg_typ = arg_exp.typ.typ(context.db());
+                match arg_typ {
                     Type::Base(Base::Numeric(new_type)) => {
                         let sign_differs = integer.is_signed() != new_type.is_signed();
                         let size_differs = integer.size() != new_type.size();
 
                         if sign_differs && size_differs {
-                            context.error("Casting between numeric values can change the sign or size but not both at once", arg.span, &format!("can not cast from `{}` to `{}` in a single step", arg_exp.typ, typ));
+                            context.error("Casting between numeric values can change the sign or size but not both at once", arg.span, &format!("can not cast from `{}` to `{}` in a single step", arg_exp.typ.display(context.db()), typ.display(context.db())));
                         }
                     }
                     Type::Base(Base::Address) => {
@@ -1234,28 +1304,32 @@ fn expr_call_type_constructor(
                         context.error(
                             "type mismatch",
                             arg.span,
-                            &format!("expected a numeric type but was `{}`", arg_exp.typ),
+                            &format!(
+                                "expected a numeric type but was `{}`",
+                                arg_typ.display(context.db())
+                            ),
                         );
                     }
                 }
             }
-            ExpressionAttributes::new(typ.clone(), Location::Value)
+            ExpressionAttributes::new(type_id, Location::Value)
         }
         Type::Base(Base::Address) => {
             if let Some(arg) = args.kind.first() {
                 let arg_attr = assignable_expr(context, &arg.kind.value, None)?;
-                match arg_attr.typ {
+                let arg_typ = arg_attr.typ.typ(context.db());
+                match arg_typ {
                     Type::Contract(_) | Type::Base(Base::Numeric(_) | Base::Address) => {}
                     _ => {
                         context.fancy_error(
-                            &format!("`{}` can not be used as a parameter to `address(..)`", arg_attr.typ),
+                            &format!("`{}` can not be used as a parameter to `address(..)`", arg_typ.display(context.db())),
                             vec![Label::primary(arg.span, "wrong type")],
                             vec!["Note: address(..) expects a parameter of a contract type, numeric or address".into()],
                         );
                     }
                 }
             };
-            ExpressionAttributes::new(Type::Base(Base::Address), Location::Value)
+            ExpressionAttributes::new(TypeId::address(context.db()), Location::Value)
         }
         Type::Base(Base::Unit) => unreachable!(), // rejected in expr_call_type
         Type::Base(Base::Bool) => unreachable!(), // handled above
@@ -1263,32 +1337,35 @@ fn expr_call_type_constructor(
         Type::Struct(_) => unreachable!(),        // handled above
         Type::Map(_) => unreachable!(),           // handled above
         Type::Array(_) => unreachable!(),         // handled above
+        Type::Generic(_) => unreachable!(),       // handled above
         Type::SelfContract(_) => unreachable!(),  /* unnameable; contract names all become
                                                     * Type::Contract */
     };
-    Ok((expr_attrs, CallType::TypeConstructor(typ)))
+    Ok((expr_attrs, CallType::TypeConstructor(type_id)))
 }
 
 fn expr_call_struct_constructor(
     context: &mut dyn AnalyzerContext,
     name_span: Span,
-    struct_: Struct,
+    struct_: StructId,
     args: &Node<Vec<Node<fe::CallArg>>>,
 ) -> Result<(ExpressionAttributes, CallType), FatalError> {
-    let id = struct_.id;
-    let name = &struct_.name;
+    let name = &struct_.name(context.db());
     // Check visibility of struct.
 
-    if id.has_private_field(context.db()) && !context.root_item().is_struct(&struct_.id) {
+    if struct_.has_private_field(context.db()) && !context.root_item().is_struct(&struct_) {
         let labels = struct_
-            .id
-            .private_fields(context.db())
+            .fields(context.db())
             .iter()
-            .map(|(name, field)| {
-                Label::primary(
-                    field.span(context.db()),
-                    format!("Field `{}` is private", name),
-                )
+            .filter_map(|(name, field)| {
+                if !field.is_public(context.db()) {
+                    Some(Label::primary(
+                        field.span(context.db()),
+                        format!("Field `{}` is private", name),
+                    ))
+                } else {
+                    None
+                }
             })
             .collect();
 
@@ -1307,16 +1384,16 @@ fn expr_call_struct_constructor(
 
     let db = context.db();
     let fields = struct_
-        .id
         .fields(db)
         .iter()
         .map(|(name, field)| (name.clone(), field.typ(db)))
         .collect::<Vec<_>>();
     validate_named_args(context, name, name_span, args, &fields)?;
 
+    let struct_type = struct_.as_type(context.db());
     Ok((
-        ExpressionAttributes::new(Type::Struct(struct_.clone()), Location::Memory),
-        CallType::TypeConstructor(Type::Struct(struct_)),
+        ExpressionAttributes::new(struct_type, Location::Memory),
+        CallType::TypeConstructor(struct_type),
     ))
 }
 
@@ -1332,9 +1409,9 @@ fn expr_call_method(
     // and the global objects are replaced by `Context`, we can remove this.
     // All other `NamedThing`s will be handled correctly by `expr()`.
     if let fe::Expr::Name(name) = &target.kind {
-        if let Ok(Some(NamedThing::Item(Item::Type(id)))) = context.resolve_name(name, target.span)
+        if let Ok(Some(NamedThing::Item(Item::Type(def)))) = context.resolve_name(name, target.span)
         {
-            let typ = id.typ(context.db())?;
+            let typ = def.typ(context.db())?;
             return expr_call_type_attribute(context, typ, target.span, field, generic_args, args);
         }
     }
@@ -1353,15 +1430,27 @@ fn expr_call_method(
         );
     }
 
-    // If the target is a "class" type (contract or struct), check for a member
-    // function
-    if let Some(class) = target_attributes.typ.as_class() {
-        if matches!(class, Class::Contract(_)) {
-            check_for_call_to_special_fns(context, &field.kind, field.span)?;
-        }
-        if let Some(method) = class.function(context.db(), &field.kind) {
-            let is_self = is_self_value(target);
+    let target_type = target_attributes.typ;
+    if target_type.is_contract(context.db()) {
+        check_for_call_to_special_fns(context, &field.kind, field.span)?;
+    }
 
+    match target_type
+        .function_sigs(context.db(), &field.kind)
+        .to_vec()
+        .as_slice()
+    {
+        [] => Err(FatalError::new(context.fancy_error(
+            &format!(
+                "No function `{}` exists on type `{}`",
+                &field.kind,
+                &target_attributes.typ.display(context.db())
+            ),
+            vec![Label::primary(field.span, "undefined function")],
+            vec![],
+        ))),
+        [method] => {
+            let is_self = is_self_value(target);
             if is_self && !method.takes_self(context.db()) {
                 context.fancy_error(
                     &format!("`{}` must be called without `self`", &field.kind),
@@ -1376,8 +1465,8 @@ fn expr_call_method(
                     &format!(
                         "the function `{}` on `{} {}` is private",
                         &field.kind,
-                        class.kind(),
-                        class.name(context.db())
+                        target_type.kind_display_name(context.db()),
+                        target_type.name(context.db())
                     ),
                     vec![
                         Label::primary(field.span, "this function is not `pub`"),
@@ -1389,22 +1478,17 @@ fn expr_call_method(
                     vec![],
                 );
             }
-
             let sig = method.signature(context.db());
+            validate_named_args(context, &field.kind, field.span, args, &sig.params)?;
 
-            let params = if is_self {
-                &sig.params
-            } else {
-                sig.external_params()
-            };
-            validate_named_args(context, &field.kind, field.span, args, params)?;
-
-            let calltype = match class {
-                Class::Contract(contract) => {
+            let calltype = match target_type.typ(context.db()) {
+                Type::Contract(contract) | Type::SelfContract(contract) => {
+                    let method = contract
+                        .function(context.db(), &method.name(context.db()))
+                        .unwrap();
                     if is_self {
                         CallType::ValueMethod {
-                            is_self,
-                            class,
+                            typ: target_type,
                             method,
                         }
                     } else {
@@ -1412,7 +1496,7 @@ fn expr_call_method(
                         context.update_expression(
                             target,
                             target_attributes
-                                .into_loaded()
+                                .into_loaded(context.db())
                                 .expect("should be able to move contract type to stack"),
                         );
 
@@ -1422,44 +1506,117 @@ fn expr_call_method(
                         }
                     }
                 }
-                Class::Struct(_) => {
-                    if matches!(target_attributes.final_location(), Location::Storage { .. }) {
+                Type::Generic(inner) => CallType::TraitValueMethod {
+                    trait_id: *inner.bounds.first().expect("expected trait bound"),
+                    method: *method,
+                    generic_type: target_attributes
+                        .typ
+                        .typ(context.db())
+                        .as_generic()
+                        .expect("expected generic type")
+                        .clone(),
+                },
+                ty => {
+                    let method = method.function(context.db()).unwrap();
+
+                    if matches!(ty, Type::Struct(_) | Type::Tuple(_) | Type::Array(_))
+                        && matches!(target_attributes.final_location(), Location::Storage { .. })
+                    {
+                        let kind = target_type.kind_display_name(context.db());
                         context.fancy_error(
-                            "struct functions can only be called on structs in memory",
+                            &format!(
+                                "{kind} functions can only be called on {kind} in memory",
+                                kind = kind
+                            ),
                             vec![
                                 Label::primary(target.span, "this value is in storage"),
                                 Label::secondary(
                                     field.span,
-                                    "hint: copy the struct to memory with `.to_mem()`",
+                                    format!("hint: copy the {} to memory with `.to_mem()`", kind),
                                 ),
                             ],
                             vec![],
                         );
                     }
+
+                    if let Item::Impl(id) = method.parent(context.db()) {
+                        validate_trait_in_scope(context, field.span, method, id);
+                    }
+
                     CallType::ValueMethod {
-                        is_self,
-                        class,
+                        typ: target_type,
                         method,
                     }
                 }
             };
 
             let return_type = sig.return_type.clone()?;
-            let location = Location::assign_location(&return_type);
+            let location = Location::assign_location(&return_type.typ(context.db()));
+            Ok((ExpressionAttributes::new(return_type, location), calltype))
+        }
+        [first, second, ..] => {
+            context.fancy_error(
+                "multiple applicable items in scope",
+                vec![
+                    Label::primary(
+                        first.name_span(context.db()),
+                        format!(
+                            "candidate #1 is defined here on the `{}`",
+                            first.parent(context.db()).item_kind_display_name()
+                        ),
+                    ),
+                    Label::primary(
+                        second.name_span(context.db()),
+                        format!(
+                            "candidate #2 is defined here on the `{}`",
+                            second.parent(context.db()).item_kind_display_name()
+                        ),
+                    ),
+                ],
+                vec!["Hint: rename one of the methods to disambiguate".into()],
+            );
+            let return_type = first.signature(context.db()).return_type.clone()?;
+            let location = Location::assign_location(&return_type.typ(context.db()));
             return Ok((
-                ExpressionAttributes::new(return_type.into(), location),
-                calltype,
+                ExpressionAttributes::new(return_type, location),
+                CallType::ValueMethod {
+                    typ: target_type,
+                    method: first.function(context.db()).unwrap(),
+                },
             ));
         }
     }
-    Err(FatalError::new(context.fancy_error(
-        &format!(
-            "No function `{}` exists on type `{}`",
-            &field.kind, &target_attributes.typ
-        ),
-        vec![Label::primary(field.span, "undefined function")],
-        vec![],
-    )))
+}
+
+fn validate_trait_in_scope(
+    context: &mut dyn AnalyzerContext,
+    name_span: Span,
+    called_fn: FunctionId,
+    impl_: ImplId,
+) {
+    let treit = impl_.trait_id(context.db());
+    let type_name = impl_.receiver(context.db()).name(context.db());
+
+    if !context
+        .module()
+        .is_in_scope(context.db(), Item::Trait(treit))
+    {
+        context.fancy_error(
+            &format!(
+                "No method named `{}` found for type `{}` in the current scope",
+                called_fn.name(context.db()),
+                type_name
+            ),
+            vec![
+                Label::primary(name_span, format!("method not found in `{}`", type_name)),
+                Label::secondary(called_fn.name_span(context.db()), format!("the method is available for `{}` here", type_name))
+            ],
+            vec![
+                "Hint: items from traits can only be used if the trait is in scope".into(),
+                format!("Hint: the following trait is implemented but not in scope; perhaps add a `use` for it: `trait {}`", treit.name(context.db()))
+            ],
+        );
+    }
 }
 
 fn expr_call_builtin_value_method(
@@ -1482,7 +1639,7 @@ fn expr_call_builtin_value_method(
 
     let calltype = CallType::BuiltinValueMethod {
         method,
-        typ: value_attrs.typ.clone(),
+        typ: value_attrs.typ,
     };
     match method {
         ValueMethod::Clone => {
@@ -1508,11 +1665,31 @@ fn expr_call_builtin_value_method(
                     );
                 }
                 Location::Memory => {}
+                Location::Unresolved => {
+                    context.fancy_error(
+                        "`clone()` called on generic type",
+                        vec![
+                            Label::primary(value.span, "this value can not be cloned"),
+                            Label::secondary(method_name.span, "hint: remove `.clone()`"),
+                        ],
+                        vec![],
+                    );
+                }
             }
             Ok((value_attrs.into_cloned(), calltype))
         }
         ValueMethod::ToMem => {
             match value_attrs.location {
+                Location::Unresolved => {
+                    context.fancy_error(
+                        "`to_mem()` called on generic type",
+                        vec![
+                            Label::primary(value.span, "this value can not be copied to memory"),
+                            Label::secondary(method_name.span, "hint: remove `.to_mem()`"),
+                        ],
+                        vec![],
+                    );
+                }
                 Location::Storage { .. } => {}
                 Location::Value => {
                     context.fancy_error(
@@ -1543,7 +1720,7 @@ fn expr_call_builtin_value_method(
             }
             Ok((value_attrs.into_cloned(), calltype))
         }
-        ValueMethod::AbiEncode => match &value_attrs.typ {
+        ValueMethod::AbiEncode => match value_attrs.typ.typ(context.db()) {
             Type::Struct(struct_) => {
                 if value_attrs.final_location() != Location::Memory {
                     context.fancy_error(
@@ -1557,10 +1734,10 @@ fn expr_call_builtin_value_method(
 
                 Ok((
                     ExpressionAttributes::new(
-                        Type::Array(Array {
-                            inner: Base::Numeric(Integer::U8),
-                            size: struct_.id.fields(context.db()).len() * 32,
-                        }),
+                        context.db().intern_type(Type::Array(Array {
+                            inner: context.db().intern_type(Type::u8()),
+                            size: struct_.fields(context.db()).len() * 32,
+                        })),
                         Location::Memory,
                     ),
                     calltype,
@@ -1579,10 +1756,10 @@ fn expr_call_builtin_value_method(
 
                 Ok((
                     ExpressionAttributes::new(
-                        Type::Array(Array {
-                            inner: Base::Numeric(Integer::U8),
+                        context.db().intern_type(Type::Array(Array {
+                            inner: context.db().intern_type(Type::u8()),
                             size: tuple.items.len() * 32,
-                        }),
+                        })),
                         Location::Memory,
                     ),
                     calltype,
@@ -1591,7 +1768,7 @@ fn expr_call_builtin_value_method(
             _ => Err(FatalError::new(context.fancy_error(
                 &format!(
                     "value of type `{}` does not support `abi_encode()`",
-                    value_attrs.typ
+                    value_attrs.typ.display(context.db())
                 ),
                 vec![Label::primary(
                     value.span,
@@ -1624,173 +1801,194 @@ fn expr_call_type_attribute(
 
     let arg_attributes = expr_call_args(context, args)?;
 
-    if let Some(class) = typ.as_class() {
-        let class_name = class.name(context.db());
+    let target_type = typ.id(context.db());
+    let target_name = typ.name(context.db());
 
-        if let Class::Contract(contract) = class {
-            // Check for Foo.create/create2 (this will go away when the context object is
-            // ready)
-            if let Ok(function) = ContractTypeMethod::from_str(&field.kind) {
-                if context.root_item() == Item::Type(TypeDef::Contract(contract)) {
-                    context.fancy_error(
-                        &format!("`{contract}.{}(...)` called within `{contract}` creates an illegal circular dependency", function.as_ref(), contract=&class_name),
+    if let Type::Contract(contract) = typ {
+        // Check for Foo.create/create2 (this will go away when the context object is
+        // ready)
+        if let Ok(function) = ContractTypeMethod::from_str(&field.kind) {
+            if context.root_item() == Item::Type(TypeDef::Contract(contract)) {
+                context.fancy_error(
+                        &format!("`{contract}.{}(...)` called within `{contract}` creates an illegal circular dependency", function.as_ref(), contract=&target_name),
                         vec![Label::primary(field.span, "Contract creation")],
-                        vec![format!("Note: Consider using a dedicated factory contract to create instances of `{}`", &class_name)]);
-                }
-                let arg_count = function.arg_count();
-                validate_arg_count(
-                    context,
-                    &field.kind,
-                    field.span,
-                    args,
-                    arg_count,
-                    "argument",
-                );
+                        vec![format!("Note: Consider using a dedicated factory contract to create instances of `{}`", &target_name)]);
+            }
+            let arg_count = function.arg_count();
+            validate_arg_count(
+                context,
+                &field.kind,
+                field.span,
+                args,
+                arg_count,
+                "argument",
+            );
 
-                for i in 0..arg_count {
-                    if let Some(attrs) = arg_attributes.get(i) {
-                        if i == 0 {
-                            if let Some(context_type) = context.get_context_type() {
-                                if attrs.typ != Type::Struct(context_type) {
-                                    context.fancy_error(
-                                        &format!(
-                                            "incorrect type for argument to `{}.{}`",
-                                            &class_name,
-                                            function.as_ref()
-                                        ),
-                                        vec![Label::primary(
-                                            args.kind[i].span,
-                                            format!(
-                                                "this has type `{}`; expected `Context`",
-                                                &attrs.typ
-                                            ),
-                                        )],
-                                        vec![],
-                                    );
-                                }
-                            } else {
+            for i in 0..arg_count {
+                if let Some(attrs) = arg_attributes.get(i) {
+                    if i == 0 {
+                        if let Some(context_type) = context.get_context_type() {
+                            if attrs.typ != context_type {
                                 context.fancy_error(
-                                    "`Context` is not defined",
-                                    vec![
-                                        Label::primary(
-                                            args.span,
-                                            "`ctx` must be defined and passed into the function",
+                                    &format!(
+                                        "incorrect type for argument to `{}.{}`",
+                                        &target_name,
+                                        function.as_ref()
+                                    ),
+                                    vec![Label::primary(
+                                        args.kind[i].span,
+                                        format!(
+                                            "this has type `{}`; expected `Context`",
+                                            &attrs.typ.display(context.db())
                                         ),
-                                        Label::secondary(
-                                            context.parent_function().name_span(context.db()),
-                                            "Note: declare `ctx` in this function signature",
-                                        ),
-                                        Label::secondary(
-                                            context.parent_function().name_span(context.db()),
-                                            "Example: `pub fn foo(ctx: Context, ...)`",
-                                        ),
-                                    ],
-                                    vec![
-                                        "Note: import context with `use std::context::Context`"
-                                            .into(),
-                                        "Example: `MyContract.create(ctx, 0)`".into(),
-                                    ],
+                                    )],
+                                    vec![],
                                 );
                             }
-                        } else if !matches!(&attrs.typ, Type::Base(Base::Numeric(_))) {
+                        } else {
                             context.fancy_error(
-                                &format!(
-                                    "incorrect type for argument to `{}.{}`",
-                                    &class_name,
-                                    function.as_ref()
-                                ),
-                                vec![Label::primary(
-                                    args.kind[i].span,
-                                    format!("this has type `{}`; expected a number", &attrs.typ),
-                                )],
-                                vec![],
+                                "`Context` is not defined",
+                                vec![
+                                    Label::primary(
+                                        args.span,
+                                        "`ctx` must be defined and passed into the function",
+                                    ),
+                                    Label::secondary(
+                                        context.parent_function().name_span(context.db()),
+                                        "Note: declare `ctx` in this function signature",
+                                    ),
+                                    Label::secondary(
+                                        context.parent_function().name_span(context.db()),
+                                        "Example: `pub fn foo(ctx: Context, ...)`",
+                                    ),
+                                ],
+                                vec![
+                                    "Note: import context with `use std::context::Context`".into(),
+                                    "Example: `MyContract.create(ctx, 0)`".into(),
+                                ],
                             );
                         }
+                    } else if !attrs.typ.is_integer(context.db()) {
+                        context.fancy_error(
+                            &format!(
+                                "incorrect type for argument to `{}.{}`",
+                                &target_name,
+                                function.as_ref()
+                            ),
+                            vec![Label::primary(
+                                args.kind[i].span,
+                                format!(
+                                    "this has type `{}`; expected a number",
+                                    &attrs.typ.display(context.db())
+                                ),
+                            )],
+                            vec![],
+                        );
                     }
                 }
-                return Ok((
-                    ExpressionAttributes::new(typ, Location::Value),
-                    CallType::BuiltinAssociatedFunction { contract, function },
-                ));
             }
+            return Ok((
+                ExpressionAttributes::new(context.db().intern_type(typ), Location::Value),
+                CallType::BuiltinAssociatedFunction { contract, function },
+            ));
+        }
+    }
+
+    if let Some(sig) = target_type.function_sig(context.db(), &field.kind) {
+        if sig.takes_self(context.db()) {
+            return Err(FatalError::new(context.fancy_error(
+                &format!(
+                    "`{}` function `{}` must be called on an instance of `{}`",
+                    &target_name, &field.kind, &target_name,
+                ),
+                vec![Label::primary(
+                    target_span,
+                    format!(
+                        "expected a value of type `{}`, found type name",
+                        &target_name
+                    ),
+                )],
+                vec![],
+            )));
+        } else {
+            context.fancy_error(
+                "Static functions need to be called with `::` not `.`",
+                vec![Label::primary(
+                    field.span,
+                    "This is a static function (doesn't take a `self` parameter)",
+                )],
+                vec![format!(
+                    "Try `{}::{}(...)` instead",
+                    &target_name, &field.kind
+                )],
+            );
         }
 
-        if let Some(function) = class.function(context.db(), &field.kind) {
-            if function.takes_self(context.db()) {
-                return Err(FatalError::new(context.fancy_error(
-                    &format!(
-                        "`{}` function `{}` must be called on an instance of `{}`",
-                        &class_name, &field.kind, &class_name,
-                    ),
-                    vec![Label::primary(
-                        target_span,
-                        format!(
-                            "expected a value of type `{}`, found type name",
-                            &class_name
-                        ),
-                    )],
-                    vec![],
-                )));
-            }
+        // Returns `true` if the current contract belongs to the same class as an input
+        // `callee_class`.
+        let is_same_class = |callee_class| match (context.root_item(), callee_class) {
+            (Item::Type(TypeDef::Contract(caller)), Type::Contract(callee)) => caller == callee,
+            (Item::Type(TypeDef::Struct(caller)), Type::Struct(callee)) => caller == callee,
+            _ => false,
+        };
 
-            // Returns `true` if the current contract belongs to the same class as an input
-            // `callee_class`.
-            let is_same_class = |callee_class| match (context.root_item(), callee_class) {
-                (Item::Type(TypeDef::Contract(caller)), Class::Contract(callee)) => {
-                    caller == callee
-                }
-                (Item::Type(TypeDef::Struct(caller)), Class::Struct(callee)) => caller == callee,
-                _ => false,
-            };
-
-            // Check for visibility of callee.
-            // Emits an error if callee is not public and caller doesn't belong to the same
-            // class as callee.
-            if !function.is_public(context.db()) && is_same_class(class) {
-                context.fancy_error(
+        // Check for visibility of callee.
+        // Emits an error if callee is not public and caller doesn't belong to the same
+        // class as callee.
+        if !sig.is_public(context.db()) && is_same_class(target_type.typ(context.db())) {
+            context.fancy_error(
                     &format!(
                         "the function `{}.{}` is private",
-                        &class_name,
+                        &target_name,
                         &field.kind,
                     ),
                     vec![
                         Label::primary(field.span, "this function is not `pub`"),
                         Label::secondary(
-                            function.data(context.db()).ast.span,
+                            sig.data(context.db()).ast.span,
                             format!("`{}` is defined here", &field.kind),
                         ),
                     ],
                     vec![
-                        format!("`{}.{}` can only be called from other functions within `{}`", &class_name, &field.kind, &class_name),
-                        format!("Hint: use `pub fn {fun}(..` to make `{cls}.{fun}` callable from outside of `{cls}`", fun=&field.kind, cls=&class_name),
+                        format!("`{}.{}` can only be called from other functions within `{}`", &target_name, &field.kind, &target_name),
+                        format!("Hint: use `pub fn {fun}(..` to make `{cls}.{fun}` callable from outside of `{cls}`", fun=&field.kind, cls=&target_name),
                     ],
                 );
-            }
+        }
 
-            if matches!(class, Class::Contract(_)) {
-                // TODO: `MathLibContract::square(x)` can't be called yet, because yulgen
-                // doesn't compile-in pure functions defined on external
-                // contracts. We should also discuss how/if this will work when
-                // the external contract is deployed and called via STATICCALL
-                // or whatever.
-                context.not_yet_implemented(
+        if target_type.is_contract(context.db()) {
+            // TODO: `MathLibContract::square(x)` can't be called yet, because yulgen
+            // doesn't compile-in pure functions defined on external
+            // contracts. We should also discuss how/if this will work when
+            // the external contract is deployed and called via STATICCALL
+            // or whatever.
+            context.not_yet_implemented(
                     &format!("calling contract-associated pure functions. Consider moving `{}` outside of `{}`",
-                             &field.kind, class_name),
+                             &field.kind, target_name),
                     target_span + field.span,
                 );
-            }
-
-            let ret_type = function.signature(context.db()).return_type.clone()?;
-            let location = Location::assign_location(&ret_type);
-            return Ok((
-                ExpressionAttributes::new(ret_type.into(), location),
-                CallType::AssociatedFunction { class, function },
-            ));
         }
+
+        let ret_type = sig.signature(context.db()).return_type.clone()?;
+        let location = Location::assign_location(&ret_type.typ(context.db()));
+
+        return Ok((
+            ExpressionAttributes::new(ret_type, location),
+            CallType::AssociatedFunction {
+                typ: target_type,
+                function: sig
+                    .function(context.db())
+                    .expect("expected function signature to have body"),
+            },
+        ));
     }
 
     Err(FatalError::new(context.fancy_error(
-        &format!("No function `{}` exists on type `{}`", &field.kind, &typ),
+        &format!(
+            "No function `{}` exists on type `{}`",
+            &field.kind,
+            typ.display(context.db())
+        ),
         vec![Label::primary(field.span, "undefined function")],
         vec![],
     )))
@@ -1891,16 +2089,22 @@ fn expr_comp_operation(
     if let fe::Expr::CompOperation { left, op, right } = &exp.kind {
         // comparison operands should be moved to the stack
         let left_attr = value_expr(context, left, None)?;
-        let right_attr = value_expr(context, right, Some(&left_attr.typ))?;
+        let right_attr = value_expr(context, right, Some(left_attr.typ))?;
 
         if left_attr.typ != right_attr.typ {
             context.fancy_error(
                 &format!("`{}` operands must have the same type", op.kind),
                 vec![
-                    Label::primary(left.span, format!("this has type `{}`", left_attr.typ)),
+                    Label::primary(
+                        left.span,
+                        format!("this has type `{}`", left_attr.typ.display(context.db())),
+                    ),
                     Label::secondary(
                         right.span,
-                        format!("this has incompatible type `{}`", right_attr.typ),
+                        format!(
+                            "this has incompatible type `{}`",
+                            right_attr.typ.display(context.db())
+                        ),
                     ),
                 ],
                 vec![],
@@ -1909,7 +2113,7 @@ fn expr_comp_operation(
 
         // for now we assume these are the only possible attributes
         return Ok(ExpressionAttributes::new(
-            Type::Base(Base::Bool),
+            TypeId::bool(context.db()),
             Location::Value,
         ));
     }
@@ -1936,14 +2140,17 @@ fn expr_ternary(
         // This could be memory or the stack, depending on the type.
         let if_expr_attributes = assignable_expr(context, if_expr, None)?;
         let else_expr_attributes =
-            assignable_expr(context, else_expr, Some(&if_expr_attributes.typ))?;
+            assignable_expr(context, else_expr, Some(if_expr_attributes.typ))?;
 
         // Make sure the `test_attributes` is a boolean type.
-        if Type::Base(Base::Bool) != test_attributes.typ {
+        if !test_attributes.typ.is_bool(context.db()) {
             context.error(
                 "`if` test expression must be a `bool`",
                 test.span,
-                &format!("this has type `{}`; expected `bool`", test_attributes.typ),
+                &format!(
+                    "this has type `{}`; expected `bool`",
+                    test_attributes.typ.display(context.db())
+                ),
             );
         }
         // Should have the same return Type
@@ -1953,11 +2160,17 @@ fn expr_ternary(
                 vec![
                     Label::primary(
                         if_expr.span,
-                        format!("this has type `{}`", if_expr_attributes.typ),
+                        format!(
+                            "this has type `{}`",
+                            if_expr_attributes.typ.display(context.db())
+                        ),
                     ),
                     Label::secondary(
                         else_expr.span,
-                        format!("this has type `{}`", else_expr_attributes.typ),
+                        format!(
+                            "this has type `{}`",
+                            else_expr_attributes.typ.display(context.db())
+                        ),
                     ),
                 ],
                 vec![],
@@ -1977,16 +2190,19 @@ fn expr_bool_operation(
     if let fe::Expr::BoolOperation { left, op, right } = &exp.kind {
         for operand in &[left, right] {
             let attributes = value_expr(context, operand, None)?;
-            if attributes.typ != Type::Base(Base::Bool) {
+            if !attributes.typ.is_bool(context.db()) {
                 context.error(
                     &format!("binary op `{}` operands must have type `bool`", op.kind),
                     operand.span,
-                    &format!("this has type `{}`; expected `bool`", attributes.typ),
+                    &format!(
+                        "this has type `{}`; expected `bool`",
+                        attributes.typ.display(context.db())
+                    ),
                 );
             }
         }
         return Ok(ExpressionAttributes::new(
-            Type::Base(Base::Bool),
+            TypeId::bool(context.db()),
             Location::Value,
         ));
     }

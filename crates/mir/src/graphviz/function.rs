@@ -2,7 +2,7 @@ use std::fmt::Write;
 
 use dot2::{label, Id};
 
-use crate::{db::MirDb, ir::FunctionId, pretty_print::PrettyPrint};
+use crate::{analysis::ControlFlowGraph, db::MirDb, ir::FunctionId, pretty_print::PrettyPrint};
 
 use super::block::BlockNode;
 
@@ -41,8 +41,9 @@ impl FunctionNode {
 
     pub(super) fn blocks(self, db: &dyn MirDb) -> Vec<BlockNode> {
         let body = self.func.body(db);
-        body.order
-            .iter_block()
+        // We use control flow graph to collect reachable blocks.
+        let cfg = ControlFlowGraph::compute(&body);
+        cfg.post_order()
             .map(|block| BlockNode::new(self.func, block))
             .collect()
     }
@@ -50,8 +51,8 @@ impl FunctionNode {
     fn signature(self, db: &dyn MirDb) -> String {
         let body = self.func.body(db);
 
-        let sig_data = self.func.data(db);
-        let mut sig = format!("fn {}(", self.func.name_with_class(db));
+        let sig_data = self.func.signature(db);
+        let mut sig = format!("fn {}(", self.func.debug_name(db));
 
         let params = &sig_data.params;
         let param_len = params.len();
@@ -67,8 +68,10 @@ impl FunctionNode {
         write!(sig, ")").unwrap();
 
         let ret_ty = self.func.return_type(db);
-        write!(sig, " -> ").unwrap();
-        ret_ty.pretty_print(db, &body.store, &mut sig).unwrap();
+        if let Some(ret_ty) = ret_ty {
+            write!(sig, " -> ").unwrap();
+            ret_ty.pretty_print(db, &body.store, &mut sig).unwrap();
+        }
 
         dot2::escape_html(&sig)
     }

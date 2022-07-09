@@ -3,6 +3,7 @@ use std::fmt::Write;
 use dot2::{label, Id};
 
 use crate::{
+    analysis::ControlFlowGraph,
     db::MirDb,
     ir::{BasicBlockId, FunctionId},
     pretty_print::PrettyPrint,
@@ -50,9 +51,10 @@ impl BlockNode {
         label::Text::HtmlStr(label.into())
     }
 
-    pub(super) fn preds(self, db: &dyn MirDb) -> Vec<BlockNode> {
-        let cfg = self.func.cfg(db);
-        cfg.preds(self.block)
+    pub(super) fn succs(self, db: &dyn MirDb) -> Vec<BlockNode> {
+        let func_body = self.func.body(db);
+        let cfg = ControlFlowGraph::compute(&func_body);
+        cfg.succs(self.block)
             .iter()
             .map(|block| Self::new(self.func, *block))
             .collect()

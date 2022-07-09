@@ -1,0 +1,4 @@
+use std::traits::Dummy
+use std::context::Context
+
+impl Dummy for Context {}

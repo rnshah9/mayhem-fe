@@ -1,21 +1,21 @@
 use crate::context::{AnalyzerContext, Constant, NamedThing};
+use crate::display::Displayable;
 use crate::errors::TypeError;
-use crate::namespace::items::Item;
-use crate::namespace::types::{FixedSize, GenericArg, GenericParamKind, GenericType, Tuple, Type};
+use crate::namespace::items::{Item, TraitId};
+use crate::namespace::types::{GenericArg, GenericParamKind, GenericType, Tuple, Type, TypeId};
 use crate::traversal::call_args::validate_arg_count;
 use fe_common::diagnostics::Label;
 use fe_common::utils::humanize::pluralize_conditionally;
 use fe_common::Spanned;
 use fe_parser::ast;
 use fe_parser::node::{Node, Span};
-use vec1::Vec1;
 
 pub fn apply_generic_type_args(
     context: &mut dyn AnalyzerContext,
     generic: GenericType,
     name_span: Span,
     args: Option<&Node<Vec<ast::GenericArg>>>,
-) -> Result<Type, TypeError> {
+) -> Result<TypeId, TypeError> {
     let params = generic.params();
 
     let args = args.ok_or_else(|| {
@@ -81,17 +81,22 @@ pub fn apply_generic_type_args(
             }
 
             (GenericParamKind::PrimitiveType, ast::GenericArg::TypeDesc(type_node)) => {
-                match type_desc(context, type_node)? {
-                    Type::Base(base) => Ok(GenericArg::Type(Type::Base(base))),
-                    typ => Err(TypeError::new(context.error(
+                let typ = type_desc(context, type_node)?;
+                if typ.is_base(context.db()) {
+                    Ok(GenericArg::Type(typ))
+                } else {
+                    Err(TypeError::new(context.error(
                         &format!(
                             "`{}` {} must be a primitive type",
                             generic.name(),
                             param.name
                         ),
                         type_node.span,
-                        &format!("this has type `{}`; expected a primitive type", typ),
-                    ))),
+                        &format!(
+                            "this has type `{}`; expected a primitive type",
+                            typ.display(context.db())
+                        ),
+                    )))
                 }
             }
 
@@ -110,7 +115,7 @@ pub fn apply_generic_type_args(
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(generic
-        .apply(&concrete_args)
+        .apply(context.db(), &concrete_args)
         .expect("failed to construct generic type after checking args"))
 }
 
@@ -133,7 +138,7 @@ pub fn resolve_concrete_type_name<T: std::fmt::Display>(
     name: &str,
     base_desc: &Node<T>,
     generic_args: Option<&Node<Vec<ast::GenericArg>>>,
-) -> Result<Type, TypeError> {
+) -> Result<TypeId, TypeError> {
     let named_thing = context.resolve_name(name, base_desc.span)?;
     resolve_concrete_type_named_thing(context, named_thing, base_desc, generic_args)
 }
@@ -143,7 +148,7 @@ pub fn resolve_concrete_type_path<T: std::fmt::Display>(
     path: &ast::Path,
     base_desc: &Node<T>,
     generic_args: Option<&Node<Vec<ast::GenericArg>>>,
-) -> Result<Type, TypeError> {
+) -> Result<TypeId, TypeError> {
     let named_thing = context.resolve_path(path, base_desc.span);
     resolve_concrete_type_named_thing(context, named_thing, base_desc, generic_args)
 }
@@ -153,7 +158,7 @@ pub fn resolve_concrete_type_named_thing<T: std::fmt::Display>(
     named_thing: Option<NamedThing>,
     base_desc: &Node<T>,
     generic_args: Option<&Node<Vec<ast::GenericArg>>>,
-) -> Result<Type, TypeError> {
+) -> Result<TypeId, TypeError> {
     match named_thing {
         Some(NamedThing::Item(Item::Type(id))) => {
             if let Some(args) = generic_args {
@@ -166,7 +171,7 @@ pub fn resolve_concrete_type_named_thing<T: std::fmt::Display>(
                     vec![],
                 );
             }
-            id.typ(context.db())
+            id.type_id(context.db())
         }
         Some(NamedThing::Item(Item::GenericType(generic))) => {
             apply_generic_type_args(context, generic, base_desc.span, generic_args)
@@ -212,7 +217,7 @@ pub fn resolve_concrete_type_named_thing<T: std::fmt::Display>(
 pub fn type_desc(
     context: &mut dyn AnalyzerContext,
     desc: &Node<ast::TypeDesc>,
-) -> Result<Type, TypeError> {
+) -> Result<TypeId, TypeError> {
     match &desc.kind {
         ast::TypeDesc::Base { base } => resolve_concrete_type_name(context, base, desc, None),
         ast::TypeDesc::Path(path) => resolve_concrete_type_path(context, path, desc, None),
@@ -223,19 +228,92 @@ pub fn type_desc(
         ast::TypeDesc::Tuple { items } => {
             let types = items
                 .iter()
-                .map(|typ| match FixedSize::try_from(type_desc(context, typ)?) {
-                    Ok(typ) => Ok(typ),
-                    Err(_) => Err(TypeError::new(context.error(
+                .map(|typ| match type_desc(context, typ) {
+                    Ok(typ) if typ.has_fixed_size(context.db()) => Ok(typ),
+                    Err(e) => Err(e),
+                    _ => Err(TypeError::new(context.error(
                         "tuple elements must have fixed size",
                         typ.span,
                         "this can't be stored in a tuple",
                     ))),
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(Type::Tuple(Tuple {
-                items: Vec1::try_from_vec(types).expect("tuple is empty"),
-            }))
+            Ok(context.db().intern_type(Type::Tuple(Tuple {
+                items: types.into(),
+            })))
         }
-        ast::TypeDesc::Unit => Ok(Type::unit()),
+        ast::TypeDesc::Unit => Ok(TypeId::unit(context.db())),
+    }
+}
+
+/// Maps a type description node to a `TraitId`.
+pub fn type_desc_to_trait(
+    context: &mut dyn AnalyzerContext,
+    desc: &Node<ast::TypeDesc>,
+) -> Result<TraitId, TypeError> {
+    match &desc.kind {
+        ast::TypeDesc::Base { base } => {
+            let named_thing = context.resolve_name(base, desc.span)?;
+            resolve_concrete_trait_named_thing(context, named_thing, desc)
+        }
+        ast::TypeDesc::Path(path) => {
+            let named_thing = context.resolve_path(path, desc.span);
+            resolve_concrete_trait_named_thing(context, named_thing, desc)
+        }
+        // generic will need to allow for paths too
+        ast::TypeDesc::Generic { base, .. } => {
+            let named_thing = context.resolve_name(&base.kind, desc.span)?;
+            resolve_concrete_trait_named_thing(context, named_thing, desc)
+        }
+        _ => panic!("Should be rejected by parser"),
+    }
+}
+
+pub fn resolve_concrete_trait_named_thing<T: std::fmt::Display>(
+    context: &mut dyn AnalyzerContext,
+    val: Option<NamedThing>,
+    base_desc: &Node<T>,
+) -> Result<TraitId, TypeError> {
+    match val {
+        Some(NamedThing::Item(Item::Trait(treit))) => Ok(treit),
+        Some(NamedThing::Item(Item::Type(ty))) => Err(TypeError::new(context.error(
+            &format!("expected trait, found type `{}`", ty.name(context.db())),
+            base_desc.span,
+            "not a trait",
+        ))),
+        Some(named_thing) => Err(TypeError::new(context.fancy_error(
+            &format!("`{}` is not a trait name", base_desc.kind),
+            if let Some(def_span) = named_thing.name_span(context.db()) {
+                vec![
+                    Label::primary(
+                        def_span,
+                        format!(
+                            "`{}` is defined here as a {}",
+                            base_desc.kind,
+                            named_thing.item_kind_display_name()
+                        ),
+                    ),
+                    Label::primary(
+                        base_desc.span,
+                        format!("`{}` is used here as a trait", base_desc.kind),
+                    ),
+                ]
+            } else {
+                vec![Label::primary(
+                    base_desc.span,
+                    format!(
+                        "`{}` is a {}",
+                        base_desc.kind,
+                        named_thing.item_kind_display_name()
+                    ),
+                )]
+            },
+            vec![],
+        ))),
+        None => Err(TypeError::new(context.error(
+            "undefined trait",
+            base_desc.span,
+            &format!("`{}` has not been defined", base_desc.kind),
+        ))),
     }
 }
