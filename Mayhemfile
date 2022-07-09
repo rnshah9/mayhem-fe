@@ -4,3 +4,5 @@ target: fe
 cmds:
   - cmd: /mayhem-fe/target/debug/fe @@
     timeout: 30
+    env:
+      DISABLE_SMOKETEST: '1'

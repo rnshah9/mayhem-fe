@@ -8,7 +8,9 @@ ADD . /mayhem-fe
 WORKDIR /mayhem-fe
 
 RUN  ~/.cargo/bin/cargo build --verbose --features solc-backend; exit 0
-RUN echo 3479fd502d44de22 > /root/.cargo/git/checkouts/solc-rust-3479fd502d44de22/52d4146/solidity/commit_hash.txt
+RUN SOLIDITY=$(find /root -name solidity) && \
+    cd $SOLIDITY && \
+    echo 3479fd502d44de22 > commit_hash.txt
 RUN  ~/.cargo/bin/cargo build --verbose --features solc-backend
 
 RUN mkdir -p /deps
