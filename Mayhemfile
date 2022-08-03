@@ -2,7 +2,7 @@ project: fe
 target: fe
 
 cmds:
-  - cmd: /install/debug/fe @@
+  - cmd: /install/debug/fe check @@
     timeout: 30
     env:
       DISABLE_SMOKETEST: '1'
